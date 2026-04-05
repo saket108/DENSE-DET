@@ -1,0 +1,90 @@
+model:
+  variant: small
+  backbone_name: vst
+  backbone_dims: null
+  backbone_depths: null
+  neck_name: cafpn
+  head_depth: 2
+  use_detail_branch: false
+  use_quality_head: true
+  use_auxiliary_heads: false
+  use_polarized_attention: true
+  pretrained_backbone: false
+  pretrained_backbone_path: null
+
+data:
+  format: detection
+  num_classes: 6
+  class_names:
+    - crack
+    - dent
+    - corrosion
+    - scratch
+    - missing-head
+    - paint-peel-off
+  image_size: 640
+
+train:
+  epochs: 300
+  # FIX: was 0 (disabled). Set >0 to enable early stopping.
+  # With eval_every_epochs=5 a patience of 30 means ~30 epochs without
+  # improvement before stopping (the fixed counter tracks all epochs, not
+  # just eval epochs).
+  patience: 30
+  batch_size: 8
+  num_workers: 0
+  image_size: 640
+  balanced_sampler: true
+
+optimizer:
+  lr: 0.0004
+  # FIX: was ignored in original (hardcoded 0.0005 in train_dense.py).
+  # Now read correctly. 0.05 is standard for AdamW on ViT-style models;
+  # for conv-heavy detectors 0.01 is also common. Set based on your model.
+  weight_decay: 0.05
+
+scheduler:
+  warmup_epochs: 10
+  eta_min_ratio: 0.01
+
+loss:
+  assigner: fcos
+  quality: 1.0
+  auxiliary: 0.0
+  # FIX: added for EvidentialQualityHead KL annealing.
+  # Set to 0 to disable (pure NLL), or ~20 to anneal KL weight from 0→1
+  # over the first 20 epochs. Only has effect with EvidentialQualityHead.
+  evidential_kl_anneal_epochs: 20
+
+augmentation:
+  # FIX: was false. For a small aircraft damage dataset, augmentation is
+  # important for generalisation. Enable for training runs.
+  enabled: true
+
+  # FIX: was 10, meaning augmentation was CLOSED after epoch 10 (first 3%
+  # of a 300-epoch run). Correct intent is to close in the LAST N epochs
+  # so the model fine-tunes on clean data at the end.
+  # Set to (total_epochs - 10) = 290 to close augmentation after epoch 290.
+  close_after_epochs: 290
+
+  fliplr: 0.5
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  blur_prob: 0.01
+  grayscale_prob: 0.01
+  equalize_prob: 0.01
+  erasing_prob: 0.4
+
+eval:
+  batch_size: 8
+  conf_thresh: 0.25
+  iou_thresh: 0.5
+  nms_iou: 0.6
+  during_train_every_epochs: 5
+  during_train_max_batches: null
+  checkpoint_metric: map50_95
+
+checkpoint:
+  save_dir: runs/dense_det
+  save_period_batches: 0
