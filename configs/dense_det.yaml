@@ -6,7 +6,12 @@ model:
   neck_name: cafpn
   head_depth: 2
   use_detail_branch: false
+  stem_type: detail
+  backbone_block: vst
+  refine_block: dilated
+  use_gradient_preservation_neck: false
   use_quality_head: true
+  head_type: dense
   use_auxiliary_heads: false
   use_polarized_attention: true
   pretrained_backbone: false

@@ -231,6 +231,10 @@ def parse_args():
     parser.add_argument("--pretrained_backbone_path", type=str, default=None)
     parser.add_argument("--neck_name",   type=str, default=None)
     parser.add_argument("--head_depth",  type=int, default=None)
+    parser.add_argument("--stem_type", type=str, default=None)
+    parser.add_argument("--backbone_block", type=str, default=None)
+    parser.add_argument("--refine_block", type=str, default=None)
+    parser.add_argument("--head_type", type=str, default=None)
     parser.add_argument("--use_auxiliary_heads",    dest="use_auxiliary_heads",    action="store_true")
     parser.add_argument("--no_use_auxiliary_heads", dest="use_auxiliary_heads",    action="store_false")
     parser.add_argument("--assigner",              type=str,   default=None, choices=["fcos", "atss"])
@@ -238,6 +242,16 @@ def parse_args():
     parser.add_argument("--auxiliary_loss_weight", type=float, default=None)
     parser.add_argument("--polarized_attention",    dest="use_polarized_attention", action="store_true")
     parser.add_argument("--no_polarized_attention", dest="use_polarized_attention", action="store_false")
+    parser.add_argument(
+        "--gradient_preservation_neck",
+        dest="use_gradient_preservation_neck",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no_gradient_preservation_neck",
+        dest="use_gradient_preservation_neck",
+        action="store_false",
+    )
     parser.add_argument("--detail_branch",    dest="use_detail_branch", action="store_true")
     parser.add_argument("--no_detail_branch", dest="use_detail_branch", action="store_false")
     parser.add_argument("--quality_head",    dest="use_quality_head", action="store_true")
@@ -246,6 +260,7 @@ def parse_args():
     parser.set_defaults(
         use_detail_branch=None, use_quality_head=None,
         use_auxiliary_heads=None, use_polarized_attention=None,
+        use_gradient_preservation_neck=None,
         augment=None, balanced_sampler=None,
     )
     return parser.parse_args()
@@ -353,11 +368,20 @@ def resolve_args(args):
         ),
         "neck_name":  coalesce(args.neck_name,  model_cfg.get("neck_name"),  "cafpn"),
         "head_depth": coalesce(args.head_depth, model_cfg.get("head_depth"), 2),
+        "stem_type": coalesce(args.stem_type, model_cfg.get("stem_type"), "detail"),
+        "backbone_block": coalesce(args.backbone_block, model_cfg.get("backbone_block"), "vst"),
+        "refine_block": coalesce(args.refine_block, model_cfg.get("refine_block"), "dilated"),
+        "head_type": coalesce(args.head_type, model_cfg.get("head_type"), "dense"),
         "use_detail_branch":   coalesce(args.use_detail_branch,   model_cfg.get("use_detail_branch"),   False),
         "use_quality_head":    coalesce(args.use_quality_head,    model_cfg.get("use_quality_head"),    True),
         "use_auxiliary_heads": coalesce(args.use_auxiliary_heads, model_cfg.get("use_auxiliary_heads"), False),
         "use_polarized_attention": coalesce(
             args.use_polarized_attention, model_cfg.get("use_polarized_attention"), False,
+        ),
+        "use_gradient_preservation_neck": coalesce(
+            args.use_gradient_preservation_neck,
+            model_cfg.get("use_gradient_preservation_neck"),
+            False,
         ),
         "pretrained_backbone": (
             False if args.no_pretrained_backbone
@@ -416,7 +440,12 @@ def build_model_config(args):
         "pretrained_backbone_path": args.pretrained_backbone_path,
         "neck_name":             args.neck_name,
         "head_depth":            args.head_depth,
+        "stem_type":             args.stem_type,
+        "backbone_block":        args.backbone_block,
+        "refine_block":          args.refine_block,
+        "head_type":             args.head_type,
         "use_detail_branch":     args.use_detail_branch,
+        "use_gradient_preservation_neck": args.use_gradient_preservation_neck,
         "use_quality_head":      args.use_quality_head,
         "use_auxiliary_heads":   args.use_auxiliary_heads,
         "use_polarized_attention": args.use_polarized_attention,
@@ -440,7 +469,9 @@ def apply_checkpoint_model_config(args, checkpoint):
         "num_classes", "class_names", "variant", "backbone_name",
         "backbone_dims", "backbone_depths", "pretrained_backbone",
         "pretrained_backbone_path", "neck_name", "head_depth",
-        "use_detail_branch", "use_quality_head", "use_auxiliary_heads", "data_format",
+        "stem_type", "backbone_block", "refine_block", "head_type",
+        "use_detail_branch", "use_gradient_preservation_neck",
+        "use_quality_head", "use_auxiliary_heads", "data_format",
     ):
         if key in model_config:
             setattr(args, key, model_config[key])
@@ -622,8 +653,13 @@ def main():
     print(f"Backbone     : {args.backbone_name}")
     if args.backbone_dims and args.backbone_depths:
         print(f"Backbone cfg : dims={args.backbone_dims}, depths={args.backbone_depths}")
+    print(f"Backbone blk : {args.backbone_block}")
     print(f"Variant      : {args.variant}")
     print(f"Neck         : {args.neck_name}")
+    print(f"Stem         : {args.stem_type}")
+    print(f"Refine blk   : {args.refine_block}")
+    print(f"GPN          : {args.use_gradient_preservation_neck}")
+    print(f"Head type    : {args.head_type}")
     print(f"Epochs       : {args.epochs}  patience={args.patience or 'off'}")
     print(f"Batch        : {args.batch}   lr={args.lr}  wd={args.weight_decay}")  # FIX-1
     print(f"Classes      : {args.num_classes}")

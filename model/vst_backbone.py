@@ -5,6 +5,11 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+try:
+    from model.novel_blocks import AnisotropicStripEncoder
+except ImportError:
+    from novel_blocks import AnisotropicStripEncoder
+
 
 def _group_count(channels: int, max_groups: int = 8) -> int:
     for groups in range(min(max_groups, channels), 0, -1):
@@ -65,6 +70,26 @@ class VSTBlock(nn.Module):
         return residual + self.layer_scale * x
 
 
+BACKBONE_BLOCK_ALIASES = {
+    "vst": "vst",
+    "standard": "vst",
+    "base": "vst",
+    "anisotropic_strip": "anisotropic_strip",
+    "strip": "anisotropic_strip",
+    "ase": "anisotropic_strip",
+}
+
+
+def _resolve_block_type(block_type: str) -> str:
+    resolved = BACKBONE_BLOCK_ALIASES.get(block_type, block_type)
+    if resolved not in {"vst", "anisotropic_strip"}:
+        supported = ", ".join(sorted({"vst", "anisotropic_strip"}))
+        raise ValueError(
+            f"Unsupported backbone block '{block_type}'. Expected one of {supported}."
+        )
+    return resolved
+
+
 class VSTStem(nn.Module):
     """Two-stage entry stem that preserves fine damage cues."""
 
@@ -123,6 +148,7 @@ class VSTBackbone(nn.Module):
         self,
         dims: tuple[int, int, int, int] = (32, 64, 128, 256),
         depths: tuple[int, int, int, int] = (2, 2, 4, 2),
+        block_type: str = "vst",
     ) -> None:
         super().__init__()
         if len(dims) != 4 or len(depths) != 4:
@@ -131,11 +157,18 @@ class VSTBackbone(nn.Module):
         self.model_name = "vst"
         self.channels = tuple(int(value) for value in dims)
         self.depths = tuple(int(value) for value in depths)
+        self.block_type = _resolve_block_type(block_type)
         self.reductions = (4, 8, 16, 32)
 
         self.stem = VSTStem(in_channels=3, out_channels=dims[0])
         self.downsamples = nn.ModuleList()
         self.stages = nn.ModuleList()
+
+        block_cls: type[nn.Module]
+        if self.block_type == "anisotropic_strip":
+            block_cls = AnisotropicStripEncoder
+        else:
+            block_cls = VSTBlock
 
         for index in range(4):
             if index == 0:
@@ -143,7 +176,7 @@ class VSTBackbone(nn.Module):
             else:
                 self.downsamples.append(VSTDownsample(dims[index - 1], dims[index]))
             self.stages.append(
-                nn.Sequential(*[VSTBlock(dims[index]) for _ in range(depths[index])])
+                nn.Sequential(*[block_cls(dims[index]) for _ in range(depths[index])])
             )
 
         self._init_weights()

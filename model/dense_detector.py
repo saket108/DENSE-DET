@@ -19,6 +19,12 @@ from model.dense_blocks import (
     SpatialChannelGate,
     WeightedFeatureFusion,
 )
+from model.novel_blocks import (
+    ContentAdaptiveDilationBlock,
+    EvidentialQualityHead,
+    FrequencyDecoupledStem,
+    GradientPreservationNeck,
+)
 from model.vst_backbone import VSTBackbone
 from utils.box_ops import distance_to_boxes, xyxy_abs_to_cxcywh_norm
 from utils.points import build_points
@@ -46,6 +52,31 @@ VST_PRESETS = {
     },
 }
 
+DETAIL_STEM_ALIASES = {
+    "detail": "detail",
+    "standard": "detail",
+    "base": "detail",
+    "frequency_decoupled": "frequency_decoupled",
+    "fds": "frequency_decoupled",
+}
+
+REFINE_BLOCK_ALIASES = {
+    "dilated": "dilated",
+    "standard": "dilated",
+    "base": "dilated",
+    "adaptive_dilation": "adaptive_dilation",
+    "content_adaptive_dilation": "adaptive_dilation",
+    "cadb": "adaptive_dilation",
+}
+
+HEAD_TYPE_ALIASES = {
+    "dense": "dense",
+    "standard": "dense",
+    "base": "dense",
+    "evidential": "evidential",
+    "eqh": "evidential",
+}
+
 
 @dataclass(frozen=True)
 class VariantConfig:
@@ -58,6 +89,73 @@ VARIANTS = {
     "small": VariantConfig(detail_channels=48, head_channels=128),
     "base": VariantConfig(detail_channels=64, head_channels=160),
 }
+
+
+def _resolve_detail_stem_type(stem_type: str) -> str:
+    resolved = DETAIL_STEM_ALIASES.get(stem_type, stem_type)
+    if resolved not in {"detail", "frequency_decoupled"}:
+        supported = ", ".join(sorted({"detail", "frequency_decoupled"}))
+        raise ValueError(f"Unsupported stem_type '{stem_type}'. Expected one of {supported}.")
+    return resolved
+
+
+def _resolve_refine_block_type(refine_block: str) -> str:
+    resolved = REFINE_BLOCK_ALIASES.get(refine_block, refine_block)
+    if resolved not in {"dilated", "adaptive_dilation"}:
+        supported = ", ".join(sorted({"dilated", "adaptive_dilation"}))
+        raise ValueError(
+            f"Unsupported refine_block '{refine_block}'. Expected one of {supported}."
+        )
+    return resolved
+
+
+def _resolve_head_type(head_type: str) -> str:
+    resolved = HEAD_TYPE_ALIASES.get(head_type, head_type)
+    if resolved not in {"dense", "evidential"}:
+        supported = ", ".join(sorted({"dense", "evidential"}))
+        raise ValueError(f"Unsupported head_type '{head_type}'. Expected one of {supported}.")
+    return resolved
+
+
+def _make_detail_stem(out_channels: int, stem_type: str) -> nn.Module:
+    resolved = _resolve_detail_stem_type(stem_type)
+    if resolved == "frequency_decoupled":
+        return FrequencyDecoupledStem(out_channels)
+    return DetailStem(out_channels)
+
+
+def _make_refine_block(channels: int, refine_block: str) -> nn.Module:
+    resolved = _resolve_refine_block_type(refine_block)
+    if resolved == "adaptive_dilation":
+        return ContentAdaptiveDilationBlock(channels)
+    return DilatedContextBridge(channels)
+
+
+def _make_detection_head(
+    head_type: str,
+    channels: int,
+    num_classes: int,
+    levels: int,
+    depth: int,
+    use_quality_head: bool,
+) -> nn.Module:
+    resolved = _resolve_head_type(head_type)
+    if resolved == "evidential":
+        if not use_quality_head:
+            raise ValueError("head_type='evidential' requires use_quality_head=True.")
+        return EvidentialQualityHead(
+            channels,
+            num_classes=num_classes,
+            levels=levels,
+            depth=depth,
+        )
+    return DenseHead(
+        channels,
+        num_classes=num_classes,
+        levels=levels,
+        depth=depth,
+        use_quality_head=use_quality_head,
+    )
 
 
 def _extract_backbone_state_dict(payload: object) -> dict[str, torch.Tensor]:
@@ -111,6 +209,7 @@ def build_backbone(
     pretrained_path: str | None = None,
     dims: tuple[int, int, int, int] | None = None,
     depths: tuple[int, int, int, int] | None = None,
+    block_type: str = "vst",
 ) -> nn.Module:
     resolved_name = BACKBONE_ALIASES.get(model_name, model_name)
     if (dims is None) != (depths is None):
@@ -119,10 +218,14 @@ def build_backbone(
     if dims is not None and depths is not None:
         dims = tuple(int(value) for value in dims)
         depths = tuple(int(value) for value in depths)
-        backbone = VSTBackbone(dims=dims, depths=depths)
+        backbone = VSTBackbone(dims=dims, depths=depths, block_type=block_type)
     elif resolved_name in VST_PRESETS:
         preset = VST_PRESETS[resolved_name]
-        backbone = VSTBackbone(dims=preset["dims"], depths=preset["depths"])
+        backbone = VSTBackbone(
+            dims=preset["dims"],
+            depths=preset["depths"],
+            block_type=block_type,
+        )
     else:
         supported = ", ".join(sorted(VST_PRESETS))
         raise ValueError(
@@ -144,6 +247,7 @@ class BiFusionNeck(nn.Module):
         in_channels: tuple[int, ...],
         out_channels: int,
         use_polarized_attention: bool = False,
+        refine_block: str = "dilated",
     ) -> None:
         super().__init__()
         self.use_detail_branch = len(in_channels) == 5
@@ -198,7 +302,7 @@ class BiFusionNeck(nn.Module):
             )
 
         self.refine = nn.ModuleList(
-            [DilatedContextBridge(out_channels) for _ in range(5 if self.use_detail_branch else 4)]
+            [_make_refine_block(out_channels, refine_block) for _ in range(5 if self.use_detail_branch else 4)]
         )
 
     def forward(self, features: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
@@ -236,6 +340,7 @@ class CAFPNNeck(nn.Module):
         in_channels: tuple[int, ...],
         out_channels: int,
         use_polarized_attention: bool = False,
+        refine_block: str = "dilated",
     ) -> None:
         super().__init__()
         if len(in_channels) != 4:
@@ -287,7 +392,9 @@ class CAFPNNeck(nn.Module):
             inputs=2,
             use_polarized_gate=use_polarized_attention,
         )
-        self.refine = nn.ModuleList([DilatedContextBridge(out_channels) for _ in range(4)])
+        self.refine = nn.ModuleList(
+            [_make_refine_block(out_channels, refine_block) for _ in range(4)]
+        )
 
     def _apply_context(self, feature: torch.Tensor, context: torch.Tensor, index: int) -> torch.Tensor:
         ctx = F.interpolate(context, size=feature.shape[-2:], mode="bilinear", align_corners=False)
@@ -321,6 +428,7 @@ class CAFPNP2Neck(nn.Module):
         in_channels: tuple[int, ...],
         out_channels: int,
         use_polarized_attention: bool = False,
+        refine_block: str = "dilated",
     ) -> None:
         super().__init__()
         if len(in_channels) != 5:
@@ -382,7 +490,9 @@ class CAFPNP2Neck(nn.Module):
             inputs=2,
             use_polarized_gate=use_polarized_attention,
         )
-        self.refine = nn.ModuleList([DilatedContextBridge(out_channels) for _ in range(5)])
+        self.refine = nn.ModuleList(
+            [_make_refine_block(out_channels, refine_block) for _ in range(5)]
+        )
 
     def _apply_context(self, feature: torch.Tensor, context: torch.Tensor, index: int) -> torch.Tensor:
         ctx = F.interpolate(context, size=feature.shape[-2:], mode="bilinear", align_corners=False)
@@ -563,7 +673,12 @@ class DenseDet(nn.Module):
         neck_name: str = "cafpn",
         head_depth: int = 2,
         use_detail_branch: bool = False,
+        stem_type: str = "detail",
+        backbone_block: str = "vst",
+        refine_block: str = "dilated",
+        use_gradient_preservation_neck: bool = False,
         use_quality_head: bool = True,
+        head_type: str = "dense",
         use_auxiliary_heads: bool = False,
         use_polarized_attention: bool = False,
         auxiliary_strides: tuple[int, ...] = (8, 16),
@@ -583,7 +698,12 @@ class DenseDet(nn.Module):
         self.neck_name = neck_name
         self.head_depth = head_depth
         self.use_detail_branch = use_detail_branch
+        self.stem_type = _resolve_detail_stem_type(stem_type)
+        self.backbone_block = backbone_block
+        self.refine_block = _resolve_refine_block_type(refine_block)
+        self.use_gradient_preservation_neck = use_gradient_preservation_neck
         self.use_quality_head = use_quality_head
+        self.head_type = _resolve_head_type(head_type)
         self.use_auxiliary_heads = use_auxiliary_heads
         self.use_polarized_attention = use_polarized_attention
         self.auxiliary_strides = tuple(int(value) for value in auxiliary_strides)
@@ -594,16 +714,25 @@ class DenseDet(nn.Module):
             pretrained_path=pretrained_backbone_path,
             dims=backbone_dims,
             depths=backbone_depths,
+            block_type=self.backbone_block,
         )
         self.pretrained_backbone = bool(pretrained_backbone_path)
         self.backbone_dims = tuple(int(value) for value in self.backbone.channels)
         self.backbone_depths = tuple(int(value) for value in getattr(self.backbone, "depths", ()))
+        self.backbone_block = getattr(self.backbone, "block_type", self.backbone_block)
         self.uses_stride2_path = use_detail_branch or neck_name == "cafpn_p2"
-        self.detail_stem = DetailStem(cfg.detail_channels) if self.uses_stride2_path else None
+        self.detail_stem = (
+            _make_detail_stem(cfg.detail_channels, self.stem_type) if self.uses_stride2_path else None
+        )
 
         base_channels = self.backbone.channels
         neck_in_channels = (
             (cfg.detail_channels, *base_channels) if self.uses_stride2_path else base_channels
+        )
+        self.pre_neck = (
+            GradientPreservationNeck(neck_in_channels)
+            if self.use_gradient_preservation_neck
+            else None
         )
 
         if neck_name == "bifusion":
@@ -611,6 +740,7 @@ class DenseDet(nn.Module):
                 neck_in_channels,
                 cfg.head_channels,
                 use_polarized_attention=use_polarized_attention,
+                refine_block=self.refine_block,
             )
         elif neck_name == "cafpn":
             if use_detail_branch:
@@ -619,12 +749,14 @@ class DenseDet(nn.Module):
                 neck_in_channels,
                 cfg.head_channels,
                 use_polarized_attention=use_polarized_attention,
+                refine_block=self.refine_block,
             )
         elif neck_name == "cafpn_p2":
             self.neck = CAFPNP2Neck(
                 neck_in_channels,
                 cfg.head_channels,
                 use_polarized_attention=use_polarized_attention,
+                refine_block=self.refine_block,
             )
         else:
             raise ValueError(
@@ -636,7 +768,8 @@ class DenseDet(nn.Module):
             if self.uses_stride2_path
             else self.backbone.reductions
         )
-        self.head = DenseHead(
+        self.head = _make_detection_head(
+            self.head_type,
             cfg.head_channels,
             num_classes,
             levels=len(self.strides),
@@ -658,9 +791,14 @@ class DenseDet(nn.Module):
         if self.uses_stride2_path:
             assert self.detail_stem is not None
             detail = self.detail_stem(images)
-            pyramid = self.neck((detail, *features))
+            neck_inputs: tuple[torch.Tensor, ...] = (detail, *features)
         else:
-            pyramid = self.neck(features)
+            neck_inputs = features
+
+        if self.pre_neck is not None:
+            neck_inputs = self.pre_neck(neck_inputs)
+
+        pyramid = self.neck(neck_inputs)
 
         outputs = self.head(pyramid)
         outputs["strides"] = self.strides

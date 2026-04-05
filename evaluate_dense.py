@@ -94,11 +94,25 @@ def parse_args():
     parser.add_argument("--backbone_depths", type=str, default=None)
     parser.add_argument("--neck_name",   type=str, default=None)
     parser.add_argument("--head_depth",  type=int, default=None)
+    parser.add_argument("--stem_type", type=str, default=None)
+    parser.add_argument("--backbone_block", type=str, default=None)
+    parser.add_argument("--refine_block", type=str, default=None)
+    parser.add_argument("--head_type", type=str, default=None)
     parser.add_argument("--conf",        type=float, default=None)
     parser.add_argument("--iou_thresh",  type=float, default=None)
     parser.add_argument("--nms_iou",     type=float, default=None)
     parser.add_argument("--polarized_attention",    dest="use_polarized_attention", action="store_true")
     parser.add_argument("--no_polarized_attention", dest="use_polarized_attention", action="store_false")
+    parser.add_argument(
+        "--gradient_preservation_neck",
+        dest="use_gradient_preservation_neck",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no_gradient_preservation_neck",
+        dest="use_gradient_preservation_neck",
+        action="store_false",
+    )
     parser.add_argument("--detail_branch",    dest="use_detail_branch", action="store_true")
     parser.add_argument("--no_detail_branch", dest="use_detail_branch", action="store_false")
     parser.add_argument("--quality_head",    dest="use_quality_head", action="store_true")
@@ -111,6 +125,7 @@ def parse_args():
         use_detail_branch=None,
         use_quality_head=None,
         use_polarized_attention=None,
+        use_gradient_preservation_neck=None,
     )
     return parser.parse_args()
 
@@ -238,6 +253,10 @@ def resolve_args(args):
         ),
         "neck_name":  coalesce(args.neck_name,  model_cfg.get("neck_name"),  "cafpn"),
         "head_depth": coalesce(args.head_depth, model_cfg.get("head_depth"), 2),
+        "stem_type": coalesce(args.stem_type, model_cfg.get("stem_type"), "detail"),
+        "backbone_block": coalesce(args.backbone_block, model_cfg.get("backbone_block"), "vst"),
+        "refine_block": coalesce(args.refine_block, model_cfg.get("refine_block"), "dilated"),
+        "head_type": coalesce(args.head_type, model_cfg.get("head_type"), "dense"),
         "conf":      coalesce(args.conf,       eval_cfg.get("conf_threshold"),  0.25),
         "iou_thresh": coalesce(args.iou_thresh, eval_cfg.get("match_iou"),      0.5),
         "nms_iou":    coalesce(args.nms_iou,    eval_cfg.get("nms_iou"),         0.6),
@@ -245,6 +264,11 @@ def resolve_args(args):
         "use_detail_branch":     coalesce(args.use_detail_branch,     model_cfg.get("use_detail_branch"),     False),
         "use_quality_head":      coalesce(args.use_quality_head,      model_cfg.get("use_quality_head"),      True),
         "use_polarized_attention": coalesce(args.use_polarized_attention, model_cfg.get("use_polarized_attention"), False),
+        "use_gradient_preservation_neck": coalesce(
+            args.use_gradient_preservation_neck,
+            model_cfg.get("use_gradient_preservation_neck"),
+            False,
+        ),
         "save_results": args.save_results,
     }
 
@@ -269,7 +293,12 @@ def build_model_config(args):
         "pretrained_backbone":   args.pretrained_backbone,
         "neck_name":             args.neck_name,
         "head_depth":            args.head_depth,
+        "stem_type":             args.stem_type,
+        "backbone_block":        args.backbone_block,
+        "refine_block":          args.refine_block,
+        "head_type":             args.head_type,
         "use_detail_branch":     args.use_detail_branch,
+        "use_gradient_preservation_neck": args.use_gradient_preservation_neck,
         "use_quality_head":      args.use_quality_head,
         "use_polarized_attention": args.use_polarized_attention,
     }
@@ -286,7 +315,9 @@ def apply_checkpoint_model_config(args, checkpoint):
         "num_classes", "class_names", "variant",
         "backbone_name", "backbone_dims", "backbone_depths",
         "pretrained_backbone", "neck_name", "head_depth",
-        "use_detail_branch", "use_quality_head", "data_format",
+        "stem_type", "backbone_block", "refine_block", "head_type",
+        "use_detail_branch", "use_gradient_preservation_neck",
+        "use_quality_head", "data_format",
     ):
         if key in model_config:
             setattr(args, key, model_config[key])
@@ -402,8 +433,13 @@ def main():
     print(f"Backbone      : {args.backbone_name}")
     if args.backbone_dims and args.backbone_depths:
         print(f"Backbone cfg  : dims={args.backbone_dims}, depths={args.backbone_depths}")
+    print(f"Backbone blk  : {args.backbone_block}")
     print(f"Variant       : {args.variant}")
     print(f"Neck          : {args.neck_name}")
+    print(f"Stem          : {args.stem_type}")
+    print(f"Refine blk    : {args.refine_block}")
+    print(f"GPN           : {args.use_gradient_preservation_neck}")
+    print(f"Head type     : {args.head_type}")
     print(f"Polarized attn: {args.use_polarized_attention}")
     print(f"Quality head  : {args.use_quality_head}")
     print(f"Data          : {args.images_dir}")
