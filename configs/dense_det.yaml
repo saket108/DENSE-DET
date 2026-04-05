@@ -25,16 +25,12 @@ data:
   image_size: 640
 
 train:
-  epochs: 300
-  # FIX: was 0 (disabled). Set >0 to enable early stopping.
-  # With eval_every_epochs=5 a patience of 30 means ~30 epochs without
-  # improvement before stopping (the fixed counter tracks all epochs, not
-  # just eval epochs).
-  patience: 30
+  epochs: 80
+  patience: 15
   batch_size: 8
   num_workers: 0
   image_size: 640
-  balanced_sampler: true
+  balanced_sampler: false
 
 optimizer:
   lr: 0.0004
@@ -57,24 +53,16 @@ loss:
   evidential_kl_anneal_epochs: 20
 
 augmentation:
-  # FIX: was false. For a small aircraft damage dataset, augmentation is
-  # important for generalisation. Enable for training runs.
   enabled: true
-
-  # FIX: was 10, meaning augmentation was CLOSED after epoch 10 (first 3%
-  # of a 300-epoch run). Correct intent is to close in the LAST N epochs
-  # so the model fine-tunes on clean data at the end.
-  # Set to (total_epochs - 10) = 290 to close augmentation after epoch 290.
-  close_after_epochs: 290
-
+  close_after_epochs: 60
   fliplr: 0.5
-  hsv_h: 0.015
-  hsv_s: 0.7
-  hsv_v: 0.4
-  blur_prob: 0.01
-  grayscale_prob: 0.01
-  equalize_prob: 0.01
-  erasing_prob: 0.4
+  hsv_h: 0.01
+  hsv_s: 0.4
+  hsv_v: 0.2
+  blur_prob: 0.02
+  grayscale_prob: 0.0
+  equalize_prob: 0.02
+  erasing_prob: 0.1
 
 eval:
   batch_size: 8
