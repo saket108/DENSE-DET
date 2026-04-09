@@ -1,18 +1,19 @@
 model:
   variant: small
-  backbone_name: vst
-  backbone_dims: null
-  backbone_depths: null
-  neck_name: cafpn
+  backbone_name: vst_custom
+  backbone_dims: [16, 32, 64, 128]
+  backbone_depths: [2, 2, 4, 2]
+  neck_name: cafpn_p2
   head_depth: 2
-  use_detail_branch: false
-  stem_type: detail
-  backbone_block: vst
-  refine_block: dilated
+  use_detail_branch: true
+  stem_type: frequency_decoupled
+  backbone_block: anisotropic_strip
+  refine_block: adaptive_spectral
   use_gradient_preservation_neck: false
   use_quality_head: true
-  head_type: dense
-  use_auxiliary_heads: false
+  head_type: evidential
+  use_class_conditional_gn: true
+  use_auxiliary_heads: true
   use_polarized_attention: true
   pretrained_backbone: false
   pretrained_backbone_path: null
@@ -35,23 +36,27 @@ train:
   batch_size: 8
   num_workers: 0
   image_size: 640
-  balanced_sampler: false
+  balanced_sampler: true
+  use_ema: true
+  ema_decay: 0.9998
 
 optimizer:
   lr: 0.0004
   # FIX: was ignored in original (hardcoded 0.0005 in train_dense.py).
   # Now read correctly. 0.05 is standard for AdamW on ViT-style models;
   # for conv-heavy detectors 0.01 is also common. Set based on your model.
-  weight_decay: 0.05
+  weight_decay: 0.01
 
 scheduler:
   warmup_epochs: 10
   eta_min_ratio: 0.01
 
 loss:
-  assigner: fcos
+  assigner: atss
+  box_loss: ewiou
   quality: 1.0
-  auxiliary: 0.0
+  auxiliary: 0.25
+  uncertainty_weighted_varifocal: true
   # FIX: added for EvidentialQualityHead KL annealing.
   # Set to 0 to disable (pure NLL), or ~20 to anneal KL weight from 0→1
   # over the first 20 epochs. Only has effect with EvidentialQualityHead.

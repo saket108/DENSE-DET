@@ -98,6 +98,10 @@ def parse_args():
     parser.add_argument("--backbone_block", type=str, default=None)
     parser.add_argument("--refine_block", type=str, default=None)
     parser.add_argument("--head_type", type=str, default=None)
+    parser.add_argument("--class_conditional_gn",    dest="use_class_conditional_gn", action="store_true")
+    parser.add_argument("--no_class_conditional_gn", dest="use_class_conditional_gn", action="store_false")
+    parser.add_argument("--use_auxiliary_heads",    dest="use_auxiliary_heads",    action="store_true")
+    parser.add_argument("--no_use_auxiliary_heads", dest="use_auxiliary_heads",    action="store_false")
     parser.add_argument("--conf",        type=float, default=None)
     parser.add_argument("--iou_thresh",  type=float, default=None)
     parser.add_argument("--nms_iou",     type=float, default=None)
@@ -124,6 +128,8 @@ def parse_args():
     parser.set_defaults(
         use_detail_branch=None,
         use_quality_head=None,
+        use_class_conditional_gn=None,
+        use_auxiliary_heads=None,
         use_polarized_attention=None,
         use_gradient_preservation_neck=None,
     )
@@ -263,6 +269,10 @@ def resolve_args(args):
         "pretrained_backbone": not getattr(args, "no_pretrained_backbone", False),
         "use_detail_branch":     coalesce(args.use_detail_branch,     model_cfg.get("use_detail_branch"),     False),
         "use_quality_head":      coalesce(args.use_quality_head,      model_cfg.get("use_quality_head"),      True),
+        "use_class_conditional_gn": coalesce(
+            args.use_class_conditional_gn, model_cfg.get("use_class_conditional_gn"), False,
+        ),
+        "use_auxiliary_heads":   coalesce(args.use_auxiliary_heads,   model_cfg.get("use_auxiliary_heads"),   False),
         "use_polarized_attention": coalesce(args.use_polarized_attention, model_cfg.get("use_polarized_attention"), False),
         "use_gradient_preservation_neck": coalesce(
             args.use_gradient_preservation_neck,
@@ -300,6 +310,8 @@ def build_model_config(args):
         "use_detail_branch":     args.use_detail_branch,
         "use_gradient_preservation_neck": args.use_gradient_preservation_neck,
         "use_quality_head":      args.use_quality_head,
+        "use_class_conditional_gn": args.use_class_conditional_gn,
+        "use_auxiliary_heads":   args.use_auxiliary_heads,
         "use_polarized_attention": args.use_polarized_attention,
     }
 
@@ -317,7 +329,8 @@ def apply_checkpoint_model_config(args, checkpoint):
         "pretrained_backbone", "neck_name", "head_depth",
         "stem_type", "backbone_block", "refine_block", "head_type",
         "use_detail_branch", "use_gradient_preservation_neck",
-        "use_quality_head", "data_format",
+        "use_class_conditional_gn",
+        "use_quality_head", "use_auxiliary_heads", "data_format",
     ):
         if key in model_config:
             setattr(args, key, model_config[key])
@@ -440,6 +453,8 @@ def main():
     print(f"Refine blk    : {args.refine_block}")
     print(f"GPN           : {args.use_gradient_preservation_neck}")
     print(f"Head type     : {args.head_type}")
+    print(f"CCGN          : {args.use_class_conditional_gn}")
+    print(f"Aux heads     : {args.use_auxiliary_heads}")
     print(f"Polarized attn: {args.use_polarized_attention}")
     print(f"Quality head  : {args.use_quality_head}")
     print(f"Data          : {args.images_dir}")
@@ -452,8 +467,9 @@ def main():
     model = DenseDet(**build_model_config(args)).to(device)
 
     if checkpoint is not None:
-        model.load_state_dict(checkpoint["model"])
-        print(f"Loaded checkpoint: {args.checkpoint}")
+        state_key = "ema" if checkpoint.get("ema") is not None else "model"
+        model.load_state_dict(checkpoint[state_key])
+        print(f"Loaded checkpoint: {args.checkpoint} ({state_key} weights)")
     else:
         print("No checkpoint — evaluating random weights only")
 
@@ -462,7 +478,6 @@ def main():
         images_dir=args.images_dir,
         batch_size=args.batch,
         image_size=args.imgsz,
-        prompt_mode="cat_only",
         num_workers=args.workers,
         data_format=args.data_format,
         labels_dir=args.labels_dir,

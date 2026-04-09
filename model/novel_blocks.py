@@ -10,8 +10,10 @@ import torch.nn.functional as F
 
 try:
     from model.dense_blocks import ContextBridge, ConvBNAct, Scale
+    from model.novel_accuracy_blocks import CCGNConvBlock
 except ImportError:
     from dense_blocks import ContextBridge, ConvBNAct, Scale
+    from novel_accuracy_blocks import CCGNConvBlock
 
 
 def _group_count(channels: int, max_groups: int = 8) -> int:
@@ -237,10 +239,18 @@ class EvidentialQualityHead(nn.Module):
         num_classes: int,
         levels: int,
         depth: int = 2,
+        use_class_conditional_gn: bool = False,
     ) -> None:
         super().__init__()
+        self.use_class_conditional_gn = use_class_conditional_gn
         self.cls_tower = NovelHeadTower(channels, depth=depth)
         self.reg_tower = NovelHeadTower(channels, depth=depth)
+        if self.use_class_conditional_gn:
+            self.cls_ccgn = CCGNConvBlock(channels, num_classes)
+            self.reg_ccgn = CCGNConvBlock(channels, num_classes)
+        else:
+            self.cls_ccgn = None
+            self.reg_ccgn = None
 
         self.cls_pred = nn.Conv2d(channels, num_classes, kernel_size=3, padding=1)
         self.box_pred = nn.Conv2d(channels, 4, kernel_size=3, padding=1)
@@ -275,7 +285,13 @@ class EvidentialQualityHead(nn.Module):
             cls_feat = self.cls_tower(feature)
             reg_feat = self.reg_tower(feature)
 
-            outputs["cls"].append(self.cls_pred(cls_feat))
+            cls_logits = self.cls_pred(cls_feat)
+            if self.use_class_conditional_gn:
+                assert self.cls_ccgn is not None and self.reg_ccgn is not None
+                cls_feat = self.cls_ccgn(cls_feat, cls_logits)
+                reg_feat = self.reg_ccgn(reg_feat, cls_logits)
+                cls_logits = self.cls_pred(cls_feat)
+            outputs["cls"].append(cls_logits)
             with torch.autocast(device_type=feature.device.type, enabled=False):
                 reg_logits = self.box_pred(reg_feat.float())
                 reg_distances = F.softplus(scale(reg_logits)).clamp(max=1e4)

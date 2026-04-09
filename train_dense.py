@@ -30,6 +30,7 @@ import math
 import os
 import sys
 import time
+from copy import deepcopy
 from collections.abc import Mapping
 
 import torch
@@ -167,6 +168,33 @@ class WarmupCosineScheduler:
         self._set_lrs(self._compute_lrs(self.last_epoch))
 
 
+class ModelEMA:
+    """Exponential moving average of model weights for evaluation/checkpointing."""
+
+    def __init__(self, model: nn.Module, decay: float = 0.9998) -> None:
+        self.decay = float(decay)
+        self.ema = deepcopy(model).eval()
+        for parameter in self.ema.parameters():
+            parameter.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        model_state = model.state_dict()
+        ema_state = self.ema.state_dict()
+        for key, ema_value in ema_state.items():
+            model_value = model_state[key].detach()
+            if ema_value.dtype.is_floating_point:
+                ema_value.mul_(self.decay).add_(model_value, alpha=1.0 - self.decay)
+            else:
+                ema_value.copy_(model_value)
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        return self.ema.state_dict()
+
+    def load_state_dict(self, state_dict: dict[str, torch.Tensor]) -> None:
+        self.ema.load_state_dict(state_dict)
+
+
 def config_section(config, key):
     value = config.get(key, {})
     if value is None:
@@ -221,6 +249,9 @@ def parse_args():
     parser.add_argument("--augment_erasing_prob",       type=float, default=None)
     parser.add_argument("--warmup_epochs", type=int,   default=None)
     parser.add_argument("--min_lr_ratio",  type=float, default=None)
+    parser.add_argument("--ema",    dest="use_ema", action="store_true")
+    parser.add_argument("--no_ema", dest="use_ema", action="store_false")
+    parser.add_argument("--ema_decay", type=float, default=None)
     # FIX-4: KL annealing epochs for EvidentialQualityHead
     parser.add_argument("--evidential_kl_anneal_epochs", type=int, default=None)
     parser.add_argument("--num_classes",   type=int, default=None)
@@ -235,11 +266,24 @@ def parse_args():
     parser.add_argument("--backbone_block", type=str, default=None)
     parser.add_argument("--refine_block", type=str, default=None)
     parser.add_argument("--head_type", type=str, default=None)
+    parser.add_argument("--class_conditional_gn",    dest="use_class_conditional_gn", action="store_true")
+    parser.add_argument("--no_class_conditional_gn", dest="use_class_conditional_gn", action="store_false")
     parser.add_argument("--use_auxiliary_heads",    dest="use_auxiliary_heads",    action="store_true")
     parser.add_argument("--no_use_auxiliary_heads", dest="use_auxiliary_heads",    action="store_false")
     parser.add_argument("--assigner",              type=str,   default=None, choices=["fcos", "atss"])
+    parser.add_argument("--box_loss_type",         type=str,   default=None, choices=["giou", "ewiou"])
     parser.add_argument("--quality_loss_weight",   type=float, default=None)
     parser.add_argument("--auxiliary_loss_weight", type=float, default=None)
+    parser.add_argument(
+        "--uncertainty_weighted_varifocal",
+        dest="use_uncertainty_weighted_varifocal",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no_uncertainty_weighted_varifocal",
+        dest="use_uncertainty_weighted_varifocal",
+        action="store_false",
+    )
     parser.add_argument("--polarized_attention",    dest="use_polarized_attention", action="store_true")
     parser.add_argument("--no_polarized_attention", dest="use_polarized_attention", action="store_false")
     parser.add_argument(
@@ -260,8 +304,10 @@ def parse_args():
     parser.set_defaults(
         use_detail_branch=None, use_quality_head=None,
         use_auxiliary_heads=None, use_polarized_attention=None,
+        use_class_conditional_gn=None,
         use_gradient_preservation_neck=None,
-        augment=None, balanced_sampler=None,
+        use_uncertainty_weighted_varifocal=None,
+        augment=None, balanced_sampler=None, use_ema=None,
     )
     return parser.parse_args()
 
@@ -346,6 +392,8 @@ def resolve_args(args):
         "augment_erasing_prob":   coalesce(args.augment_erasing_prob,   augmentation_cfg.get("erasing_prob"),   0.4),
         "warmup_epochs": coalesce(args.warmup_epochs, scheduler_cfg.get("warmup_epochs"), 10),
         "min_lr_ratio":  coalesce(args.min_lr_ratio,  scheduler_cfg.get("eta_min_ratio"), 0.01),
+        "use_ema":       coalesce(args.use_ema, train_cfg.get("use_ema"), True),
+        "ema_decay":     coalesce(args.ema_decay, train_cfg.get("ema_decay"), 0.9998),
         # FIX-4: KL annealing
         "evidential_kl_anneal_epochs": coalesce(
             args.evidential_kl_anneal_epochs, loss_cfg.get("evidential_kl_anneal_epochs"), 0,
@@ -374,6 +422,9 @@ def resolve_args(args):
         "head_type": coalesce(args.head_type, model_cfg.get("head_type"), "dense"),
         "use_detail_branch":   coalesce(args.use_detail_branch,   model_cfg.get("use_detail_branch"),   False),
         "use_quality_head":    coalesce(args.use_quality_head,    model_cfg.get("use_quality_head"),    True),
+        "use_class_conditional_gn": coalesce(
+            args.use_class_conditional_gn, model_cfg.get("use_class_conditional_gn"), False,
+        ),
         "use_auxiliary_heads": coalesce(args.use_auxiliary_heads, model_cfg.get("use_auxiliary_heads"), False),
         "use_polarized_attention": coalesce(
             args.use_polarized_attention, model_cfg.get("use_polarized_attention"), False,
@@ -388,8 +439,14 @@ def resolve_args(args):
             else coalesce(model_cfg.get("pretrained_backbone"), False)
         ),
         "assigner":              coalesce(args.assigner,              loss_cfg.get("assigner"),   "fcos"),
+        "box_loss_type":         coalesce(args.box_loss_type,         loss_cfg.get("box_loss"),   "giou"),
         "quality_loss_weight":   coalesce(args.quality_loss_weight,   loss_cfg.get("quality"),    1.0),
         "auxiliary_loss_weight": coalesce(args.auxiliary_loss_weight, loss_cfg.get("auxiliary"),  0.0),
+        "use_uncertainty_weighted_varifocal": coalesce(
+            args.use_uncertainty_weighted_varifocal,
+            loss_cfg.get("uncertainty_weighted_varifocal"),
+            False,
+        ),
         "save_every_batches": coalesce(args.save_every_batches, checkpoint_cfg.get("save_period_batches"), 0),
         "eval_every_epochs":  coalesce(args.eval_every_epochs,  eval_cfg.get("during_train_every_epochs"), 5),
         "eval_max_batches":   coalesce(args.eval_max_batches,   eval_cfg.get("during_train_max_batches"),  None),
@@ -447,6 +504,7 @@ def build_model_config(args):
         "use_detail_branch":     args.use_detail_branch,
         "use_gradient_preservation_neck": args.use_gradient_preservation_neck,
         "use_quality_head":      args.use_quality_head,
+        "use_class_conditional_gn": args.use_class_conditional_gn,
         "use_auxiliary_heads":   args.use_auxiliary_heads,
         "use_polarized_attention": args.use_polarized_attention,
     }
@@ -471,6 +529,7 @@ def apply_checkpoint_model_config(args, checkpoint):
         "pretrained_backbone_path", "neck_name", "head_depth",
         "stem_type", "backbone_block", "refine_block", "head_type",
         "use_detail_branch", "use_gradient_preservation_neck",
+        "use_class_conditional_gn",
         "use_quality_head", "use_auxiliary_heads", "data_format",
     ):
         if key in model_config:
@@ -504,12 +563,15 @@ def save_checkpoint(
     model_config=None, train_loss=None, batch_in_epoch=None, total_batches=None,
     global_step=None, is_mid_epoch=False, best_val=None, best_epoch=None,
     epochs_without_improvement=None, best_checkpoint_score=None,
+    ema=None, ema_decay=None,
 ):
     os.makedirs(save_dir, exist_ok=True)
     path = os.path.join(save_dir, f"dense_det_{tag}.pt")
     torch.save(
         {
             "epoch": epoch, "model": model.state_dict(),
+            "ema": None if ema is None else ema.state_dict(),
+            "ema_decay": ema_decay,
             "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
             "val_loss": val_loss, "train_loss": train_loss,
             "batch_in_epoch": batch_in_epoch, "total_batches": total_batches,
@@ -532,7 +594,7 @@ def format_metric(value, digits=4):
 
 def train_one_epoch(
     model, loader, optimizer, loss_fn, scaler, device, epoch,
-    total_epochs=None, save_every_batches=0, checkpoint_callback=None,
+    total_epochs=None, save_every_batches=0, checkpoint_callback=None, ema=None,
 ):
     model.train()
     total_loss = 0.0
@@ -589,6 +651,9 @@ def train_one_epoch(
                 continue
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+
+        if ema is not None:
+            ema.update(model)
 
         total_loss += loss.item()
         processed_batches += 1
@@ -660,17 +725,22 @@ def main():
     print(f"Refine blk   : {args.refine_block}")
     print(f"GPN          : {args.use_gradient_preservation_neck}")
     print(f"Head type    : {args.head_type}")
+    print(f"CCGN         : {args.use_class_conditional_gn}")
     print(f"Epochs       : {args.epochs}  patience={args.patience or 'off'}")
     print(f"Batch        : {args.batch}   lr={args.lr}  wd={args.weight_decay}")  # FIX-1
     print(f"Classes      : {args.num_classes}")
     print(f"Augment      : {args.augment}  close_after={args.close_augment_after_epochs}")
+    print(f"EMA          : {args.use_ema}  decay={args.ema_decay}")
     print(f"KL anneal ep : {args.evidential_kl_anneal_epochs}")  # FIX-4
+    print(f"Box loss     : {args.box_loss_type}")
+    print(f"UW-VFL       : {args.use_uncertainty_weighted_varifocal}")
     print(f"Ckpt metric  : {args.checkpoint_metric}")
 
     print("\nBuilding DenseDet...")
     model_config            = build_model_config(args)
     checkpoint_model_config = build_checkpoint_model_config(args)
     model  = DenseDet(**model_config).to(device)
+    ema = ModelEMA(model, decay=args.ema_decay) if args.use_ema else None
     counts = model.param_count()
     print(f"  Total params     : {counts['total']:,}")
     print(f"  Trainable params : {counts['trainable']:,}")
@@ -686,14 +756,14 @@ def main():
     )
     train_loader = build_train_loader(
         json_path=args.train_json, images_dir=args.train_images,
-        batch_size=args.batch, image_size=args.imgsz, prompt_mode="cat_only",
+        batch_size=args.batch, image_size=args.imgsz,
         num_workers=args.workers, balanced=args.balanced_sampler,
         data_format=args.data_format, labels_dir=args.train_labels,
         class_names=args.class_names, augmenter=train_augmenter,
     )
     val_loader = build_val_loader(
         json_path=args.val_json, images_dir=args.val_images,
-        batch_size=args.eval_batch, image_size=args.imgsz, prompt_mode="cat_only",
+        batch_size=args.eval_batch, image_size=args.imgsz,
         num_workers=args.workers, data_format=args.data_format,
         labels_dir=args.val_labels, class_names=args.class_names,
     )
@@ -704,8 +774,10 @@ def main():
         num_classes=args.num_classes,
         strides=model.strides,
         assigner=args.assigner,
+        box_loss_type=args.box_loss_type,
         quality_loss_weight=args.quality_loss_weight,
         auxiliary_loss_weight=args.auxiliary_loss_weight,
+        use_uncertainty_weighted_varifocal=args.use_uncertainty_weighted_varifocal,
     )
 
     # FIX-1 + FIX-2: read weight_decay from config, split param groups
@@ -730,6 +802,12 @@ def main():
     if args.resume:
         ckpt = resume_ckpt or torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt["model"])
+        if ema is not None:
+            ema_state = ckpt.get("ema")
+            if ema_state is not None:
+                ema.load_state_dict(ema_state)
+            else:
+                ema.load_state_dict(model.state_dict())
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
@@ -785,21 +863,23 @@ def main():
                 is_mid_epoch=True, best_val=best_val, best_epoch=best_epoch,
                 epochs_without_improvement=epochs_without_improvement,
                 best_checkpoint_score=best_checkpoint_score,
+                ema=ema, ema_decay=args.ema_decay,
             )
             print(f"  Saved mid-epoch checkpoint: {path}")
 
         train_loss = train_one_epoch(
             model, train_loader, optimizer, loss_fn, scaler, device, epoch,
             total_epochs=args.epochs, save_every_batches=args.save_every_batches,
-            checkpoint_callback=checkpoint_callback,
+            checkpoint_callback=checkpoint_callback, ema=ema,
         )
-        val_loss = validate(model, val_loader, loss_fn, device, epoch)
+        eval_model = ema.ema if ema is not None else model
+        val_loss = validate(eval_model, val_loader, loss_fn, device, epoch)
         map50 = map5095 = ""
         summary = None
 
         if args.eval_every_epochs and epoch % args.eval_every_epochs == 0:
             ap50, ap5095, pr_metrics, summary = run_dense_evaluation(
-                model, val_loader, device, num_classes=args.num_classes,
+                eval_model, val_loader, device, num_classes=args.num_classes,
                 conf_thresh=args.eval_conf, match_iou=args.eval_iou,
                 nms_iou=args.eval_nms_iou, max_batches=args.eval_max_batches,
                 verbose=False, progress_label=f"Eval {epoch}/{args.epochs}",
@@ -866,6 +946,7 @@ def main():
             best_val=best_val, best_epoch=best_epoch,
             epochs_without_improvement=epochs_without_improvement,
             best_checkpoint_score=best_checkpoint_score,
+            ema=ema, ema_decay=args.ema_decay,
         )
 
         if improved:
@@ -877,6 +958,7 @@ def main():
                 best_val=best_val, best_epoch=best_epoch,
                 epochs_without_improvement=epochs_without_improvement,
                 best_checkpoint_score=best_checkpoint_score,
+                ema=ema, ema_decay=args.ema_decay,
             )
             metric_label = "mAP50-95" if args.checkpoint_metric == "map50_95" else args.checkpoint_metric
             print(f"  New best checkpoint by {metric_label}: {best_checkpoint_score:.4f}")
@@ -890,6 +972,7 @@ def main():
                 best_val=best_val, best_epoch=best_epoch,
                 epochs_without_improvement=epochs_without_improvement,
                 best_checkpoint_score=best_checkpoint_score,
+                ema=ema, ema_decay=args.ema_decay,
             )
 
         if (

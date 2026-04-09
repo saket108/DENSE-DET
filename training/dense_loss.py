@@ -31,6 +31,10 @@ from utils.box_ops import (
     generalized_box_iou,
 )
 from utils.points import build_points
+from model.novel_accuracy_blocks import (
+    apply_uncertainty_weighted_varifocal,
+    elongation_weighted_giou_loss,
+)
 
 
 def varifocal_loss(
@@ -113,6 +117,8 @@ class DenseDetectionLoss(nn.Module):
         quality_loss_weight: float = 1.0,
         auxiliary_loss_weight: float = 0.0,
         evidential_kl_weight: float = 0.0,   # FIX-1: annealed externally; 0 = pure NLL
+        box_loss_type: str = "giou",
+        use_uncertainty_weighted_varifocal: bool = False,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
@@ -125,8 +131,12 @@ class DenseDetectionLoss(nn.Module):
         self.quality_loss_weight = quality_loss_weight
         self.auxiliary_loss_weight = auxiliary_loss_weight
         self.evidential_kl_weight = evidential_kl_weight  # FIX-1
+        self.box_loss_type = str(box_loss_type)
+        self.use_uncertainty_weighted_varifocal = bool(use_uncertainty_weighted_varifocal)
         if self.assigner not in {"fcos", "atss"}:
             raise ValueError("assigner must be either 'fcos' or 'atss'.")
+        if self.box_loss_type not in {"giou", "ewiou"}:
+            raise ValueError("box_loss_type must be either 'giou' or 'ewiou'.")
 
         if size_ranges is None:
             if len(strides) == 5:
@@ -196,6 +206,7 @@ class DenseDetectionLoss(nn.Module):
         cls_levels = outputs["cls"]                                         # type: ignore
         box_levels = outputs["box"]                                         # type: ignore
         quality_levels: list[torch.Tensor] | None = outputs.get("quality") # type: ignore
+        uncertainty_levels: list[torch.Tensor] | None = outputs.get("uncertainty") # type: ignore
         image_h, image_w = outputs["image_size"]                            # type: ignore
         strides = tuple(int(v) for v in outputs.get("strides", self.strides))  # type: ignore
         size_ranges = self._size_ranges_for_strides(strides)
@@ -209,14 +220,15 @@ class DenseDetectionLoss(nn.Module):
         device     = cls_levels[0].device
         loss_dtype = torch.float32
 
-        flat_cls, flat_box, flat_qual = [], [], []
+        flat_cls, flat_box, flat_qual, flat_uncertainty = [], [], [], []
         flat_points, flat_ranges, flat_strides = [], [], []
 
         level_iter = zip(
             cls_levels, box_levels, strides, size_ranges,
             quality_levels if quality_levels is not None else [None] * len(cls_levels),
+            uncertainty_levels if uncertainty_levels is not None else [None] * len(cls_levels),
         )
-        for cls_map, box_map, stride, size_range, qual_map in level_iter:
+        for cls_map, box_map, stride, size_range, qual_map, uncertainty_map in level_iter:
             cls_map = cls_map.float()
             box_map = box_map.float()
             _, _, feat_h, feat_w = cls_map.shape
@@ -239,10 +251,17 @@ class DenseDetectionLoss(nn.Module):
                 else:                               # [B, C, H, W] — EvidentialQualityHead
                     B, C, H, W = q.shape
                     flat_qual.append(q.permute(0, 2, 3, 1).reshape(batch_size, -1, C))
+            if uncertainty_map is not None:
+                flat_uncertainty.append(
+                    uncertainty_map.float().reshape(batch_size, -1)
+                )
 
         pred_cls  = torch.cat(flat_cls, dim=1)       # [B, N, num_classes]
         pred_box  = torch.cat(flat_box, dim=1)        # [B, N, 4]
         pred_qual = torch.cat(flat_qual, dim=1) if flat_qual else None  # [B, N, 1 or 2]
+        pred_uncertainty = (
+            torch.cat(flat_uncertainty, dim=1) if flat_uncertainty else None
+        )  # [B, N]
         points       = torch.cat(flat_points, dim=0)
         size_ranges_t = torch.cat(flat_ranges, dim=0)
         strides_t     = torch.cat(flat_strides, dim=0)
@@ -275,8 +294,13 @@ class DenseDetectionLoss(nn.Module):
                     box_iou(pred_boxes_pos, target_boxes)
                 ).detach().clamp_(0.0, 1.0)
                 cls_targets[pos_mask, assigned["labels"][pos_mask]] = iou_values
-                giou     = generalized_box_iou(pred_boxes_pos, target_boxes)
-                box_loss = box_loss + (1.0 - torch.diag(giou)).sum()
+                if self.box_loss_type == "ewiou":
+                    box_loss = box_loss + elongation_weighted_giou_loss(
+                        pred_boxes_pos, target_boxes,
+                    )
+                else:
+                    giou = generalized_box_iou(pred_boxes_pos, target_boxes)
+                    box_loss = box_loss + (1.0 - torch.diag(giou)).sum()
                 total_pos += int(pos_mask.sum().item())
 
                 if pred_qual is not None:
@@ -293,7 +317,17 @@ class DenseDetectionLoss(nn.Module):
                             q_pos.squeeze(-1), iou_values, reduction="sum",
                         )
 
-            cls_loss = cls_loss + varifocal_loss(pred_cls[batch_index], cls_targets).sum()
+            uncertainty = (
+                pred_uncertainty[batch_index]
+                if self.use_uncertainty_weighted_varifocal and pred_uncertainty is not None
+                else None
+            )
+            if uncertainty is not None:
+                cls_loss = cls_loss + apply_uncertainty_weighted_varifocal(
+                    pred_cls[batch_index], cls_targets, uncertainty,
+                ).sum()
+            else:
+                cls_loss = cls_loss + varifocal_loss(pred_cls[batch_index], cls_targets).sum()
 
         normalizer = max(total_pos, 1)
         cls_loss   = cls_loss  / normalizer

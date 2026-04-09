@@ -25,6 +25,7 @@ from model.novel_blocks import (
     FrequencyDecoupledStem,
     GradientPreservationNeck,
 )
+from model.novel_accuracy_blocks import CCGNConvBlock, SpectralChannelAttention
 from model.vst_backbone import VSTBackbone
 from utils.box_ops import distance_to_boxes, xyxy_abs_to_cxcywh_norm
 from utils.points import build_points
@@ -67,6 +68,11 @@ REFINE_BLOCK_ALIASES = {
     "adaptive_dilation": "adaptive_dilation",
     "content_adaptive_dilation": "adaptive_dilation",
     "cadb": "adaptive_dilation",
+    "spectral_attention": "spectral_attention",
+    "spectral": "spectral_attention",
+    "sca": "spectral_attention",
+    "adaptive_spectral": "adaptive_spectral",
+    "cadb_sca": "adaptive_spectral",
 }
 
 HEAD_TYPE_ALIASES = {
@@ -101,8 +107,8 @@ def _resolve_detail_stem_type(stem_type: str) -> str:
 
 def _resolve_refine_block_type(refine_block: str) -> str:
     resolved = REFINE_BLOCK_ALIASES.get(refine_block, refine_block)
-    if resolved not in {"dilated", "adaptive_dilation"}:
-        supported = ", ".join(sorted({"dilated", "adaptive_dilation"}))
+    if resolved not in {"dilated", "adaptive_dilation", "spectral_attention", "adaptive_spectral"}:
+        supported = ", ".join(sorted({"dilated", "adaptive_dilation", "spectral_attention", "adaptive_spectral"}))
         raise ValueError(
             f"Unsupported refine_block '{refine_block}'. Expected one of {supported}."
         )
@@ -128,6 +134,13 @@ def _make_refine_block(channels: int, refine_block: str) -> nn.Module:
     resolved = _resolve_refine_block_type(refine_block)
     if resolved == "adaptive_dilation":
         return ContentAdaptiveDilationBlock(channels)
+    if resolved == "spectral_attention":
+        return SpectralChannelAttention(channels)
+    if resolved == "adaptive_spectral":
+        return nn.Sequential(
+            ContentAdaptiveDilationBlock(channels),
+            SpectralChannelAttention(channels),
+        )
     return DilatedContextBridge(channels)
 
 
@@ -138,6 +151,7 @@ def _make_detection_head(
     levels: int,
     depth: int,
     use_quality_head: bool,
+    use_class_conditional_gn: bool,
 ) -> nn.Module:
     resolved = _resolve_head_type(head_type)
     if resolved == "evidential":
@@ -148,6 +162,7 @@ def _make_detection_head(
             num_classes=num_classes,
             levels=levels,
             depth=depth,
+            use_class_conditional_gn=use_class_conditional_gn,
         )
     return DenseHead(
         channels,
@@ -155,6 +170,7 @@ def _make_detection_head(
         levels=levels,
         depth=depth,
         use_quality_head=use_quality_head,
+        use_class_conditional_gn=use_class_conditional_gn,
     )
 
 
@@ -541,11 +557,19 @@ class DenseHead(nn.Module):
         levels: int,
         depth: int = 2,
         use_quality_head: bool = True,
+        use_class_conditional_gn: bool = False,
     ) -> None:
         super().__init__()
         self.use_quality_head = use_quality_head
+        self.use_class_conditional_gn = use_class_conditional_gn
         self.cls_tower = HeadTower(channels, depth=depth)
         self.reg_tower = HeadTower(channels, depth=depth)
+        if self.use_class_conditional_gn:
+            self.cls_ccgn = CCGNConvBlock(channels, num_classes)
+            self.reg_ccgn = CCGNConvBlock(channels, num_classes)
+        else:
+            self.cls_ccgn = None
+            self.reg_ccgn = None
 
         self.cls_pred = nn.Conv2d(channels, num_classes, 3, padding=1)
         self.box_pred = nn.Conv2d(channels, 4, 3, padding=1)
@@ -577,7 +601,13 @@ class DenseHead(nn.Module):
             cls_feat = self.cls_tower(feature)
             reg_feat = self.reg_tower(feature)
 
-            outputs["cls"].append(self.cls_pred(cls_feat))
+            cls_logits = self.cls_pred(cls_feat)
+            if self.use_class_conditional_gn:
+                assert self.cls_ccgn is not None and self.reg_ccgn is not None
+                cls_feat = self.cls_ccgn(cls_feat, cls_logits)
+                reg_feat = self.reg_ccgn(reg_feat, cls_logits)
+                cls_logits = self.cls_pred(cls_feat)
+            outputs["cls"].append(cls_logits)
             with torch.autocast(device_type=feature.device.type, enabled=False):
                 reg_logits = self.box_pred(reg_feat.float())
                 reg_distances = F.softplus(scale(reg_logits)).clamp(max=1e4)
@@ -681,6 +711,7 @@ class DenseDet(nn.Module):
         head_type: str = "dense",
         use_auxiliary_heads: bool = False,
         use_polarized_attention: bool = False,
+        use_class_conditional_gn: bool = False,
         auxiliary_strides: tuple[int, ...] = (8, 16),
     ) -> None:
         super().__init__()
@@ -706,6 +737,7 @@ class DenseDet(nn.Module):
         self.head_type = _resolve_head_type(head_type)
         self.use_auxiliary_heads = use_auxiliary_heads
         self.use_polarized_attention = use_polarized_attention
+        self.use_class_conditional_gn = use_class_conditional_gn
         self.auxiliary_strides = tuple(int(value) for value in auxiliary_strides)
 
         self.backbone = build_backbone(
@@ -775,6 +807,7 @@ class DenseDet(nn.Module):
             levels=len(self.strides),
             depth=head_depth,
             use_quality_head=use_quality_head,
+            use_class_conditional_gn=use_class_conditional_gn,
         )
         self.aux_head = None
         if self.use_auxiliary_heads:

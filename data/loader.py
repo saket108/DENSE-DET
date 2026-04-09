@@ -39,20 +39,20 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 from PIL import ImageFilter, ImageOps
 
-from data.prompt_builder import (
-    CLASS_NAME_TO_ID,
-    build_batch_prompts,
-    get_image_level_prompt,
-)
-
-
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
-DEFAULT_IMAGE_PROMPT   = "No damage detected in this inspection image."
 DEFAULT_IMAGE_ZONE     = "unknown"
 DEFAULT_IMAGE_METRICS  = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=torch.float32)
 IMAGE_EXTENSIONS       = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
-CLASS_ID_TO_NAME       = {class_id: name for name, class_id in CLASS_NAME_TO_ID.items()}
+CLASS_ID_TO_NAME       = {
+    0: 'crack',
+    1: 'dent',
+    2: 'corrosion',
+    3: 'scratch',
+    4: 'missing-head',
+    5: 'paint-peel-off',
+}
+CLASS_NAME_TO_ID       = {name: class_id for class_id, name in CLASS_ID_TO_NAME.items()}
 
 
 def make_transforms(image_size: int = 640):
@@ -203,8 +203,6 @@ def _empty_target(image_id=''):
         'severities':   torch.zeros((0,),   dtype=torch.float32),
         'sev_levels':   torch.zeros((0,),   dtype=torch.long),
         'zones':        [],
-        'prompts':      [],
-        'image_prompt': DEFAULT_IMAGE_PROMPT,
         'image_zone':   DEFAULT_IMAGE_ZONE,
         'image_metrics': DEFAULT_IMAGE_METRICS.clone(),
         'image_id':     image_id,
@@ -289,8 +287,6 @@ def _detection_target_from_annotations(annotations, image_id=''):
         'severities':   torch.zeros((num_anns,),   dtype=torch.float32),
         'sev_levels':   torch.zeros((num_anns,),   dtype=torch.long),
         'zones':        [],
-        'prompts':      [],
-        'image_prompt': DEFAULT_IMAGE_PROMPT,
         'image_zone':   DEFAULT_IMAGE_ZONE,
         'image_metrics': DEFAULT_IMAGE_METRICS.clone(),
         'image_id':     image_id,
@@ -307,14 +303,12 @@ class AircraftDataset(Dataset):
         json_path:    str,
         images_dir:   str,
         image_size:   int  = 640,
-        prompt_mode:  str  = 'full',
         is_train:     bool = True,
         max_anns:     int  = 100,
         augmenter: 'DetectionAugmenter | None' = None,
     ):
         self.images_dir  = images_dir
         self.image_size  = image_size
-        self.prompt_mode = prompt_mode
         self.is_train    = is_train
         self.max_anns    = max_anns
         self.augmenter   = augmenter
@@ -392,8 +386,6 @@ class AircraftDataset(Dataset):
         if not anns:
             return image_tensor, self._empty_target(image_id), image_id
 
-        prompts      = build_batch_prompts(anns[:self.max_anns], mode=self.prompt_mode)
-        image_prompt = get_image_level_prompt(anns[:self.max_anns], mode=self.prompt_mode)
         image_zone   = _select_image_zone(zones, severities)
         image_metrics = _aggregate_image_metrics(metrics)
 
@@ -403,8 +395,7 @@ class AircraftDataset(Dataset):
             'metrics':    torch.tensor(metrics,    dtype=torch.float32),
             'severities': torch.tensor(severities, dtype=torch.float32),
             'sev_levels': torch.tensor(sev_levels, dtype=torch.long),
-            'zones':      zones, 'prompts': prompts,
-            'image_prompt': image_prompt, 'image_zone': image_zone,
+            'zones':      zones, 'image_zone': image_zone,
             'image_metrics': torch.tensor(image_metrics, dtype=torch.float32),
             'image_id': image_id, 'num_anns': len(anns[:self.max_anns]),
         }
@@ -510,27 +501,6 @@ def _aggregate_image_metrics(metrics):
     return summary.tolist()
 
 
-def summarize_target_context(target):
-    if target.get('num_anns', 0) == 0:
-        return DEFAULT_IMAGE_PROMPT, DEFAULT_IMAGE_ZONE, DEFAULT_IMAGE_METRICS.clone()
-    prompt  = target.get('image_prompt') or DEFAULT_IMAGE_PROMPT
-    zone    = target.get('image_zone')   or DEFAULT_IMAGE_ZONE
-    metrics = target.get('image_metrics')
-    if metrics is None or torch.as_tensor(metrics).numel() == 0:
-        metrics = _aggregate_image_metrics(target.get('metrics', []))
-    return prompt, zone, torch.as_tensor(metrics, dtype=torch.float32)
-
-
-def build_batch_context(targets, device):
-    prompts, zones, metrics = [], [], []
-    for target in targets:
-        p, z, m = summarize_target_context(target)
-        prompts.append(p)
-        zones.append(z)
-        metrics.append(m)
-    return prompts, zones, torch.stack(metrics).to(device)
-
-
 class ClassBalancedSampler(torch.utils.data.Sampler):
     """Oversample images containing rare classes using dataset-driven weights."""
 
@@ -610,7 +580,6 @@ def build_train_loader(
     images_dir:  str = None,
     batch_size:  int = 16,
     image_size:  int = 640,
-    prompt_mode: str = 'full',
     num_workers: int = 4,
     balanced:    bool = True,
     data_format: str = 'json',
@@ -626,7 +595,7 @@ def build_train_loader(
     else:
         dataset = AircraftDataset(
             json_path=json_path, images_dir=images_dir, image_size=image_size,
-            prompt_mode=prompt_mode, is_train=True, augmenter=augmenter,
+            is_train=True, augmenter=augmenter,
         )
 
     if len(dataset) == 0:
@@ -648,7 +617,6 @@ def build_val_loader(
     images_dir:  str = None,
     batch_size:  int = 16,
     image_size:  int = 640,
-    prompt_mode: str = 'full',
     num_workers: int = 4,
     data_format: str = 'json',
     labels_dir:  str = None,
@@ -662,7 +630,7 @@ def build_val_loader(
     else:
         dataset = AircraftDataset(
             json_path=json_path, images_dir=images_dir, image_size=image_size,
-            prompt_mode=prompt_mode, is_train=False,
+            is_train=False,
         )
 
     if len(dataset) == 0:
