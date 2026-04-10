@@ -128,6 +128,8 @@ def parse_args():
     parser.add_argument("--no_quality_head", dest="use_quality_head", action="store_false")
     parser.add_argument("--weights", type=str, default="auto", choices=["auto", "ema", "model"])
     parser.add_argument("--save_results", type=str, default=None)
+    parser.add_argument("--strict", dest="strict_load", action="store_true")
+    parser.add_argument("--no_strict", dest="strict_load", action="store_false")
     parser.set_defaults(use_quality_head=None)
     return parser.parse_args()
 
@@ -180,6 +182,7 @@ def resolve_args(args):
         "use_quality_head": coalesce(args.use_quality_head, model_cfg.get("use_quality_head"), True),
         "weights": args.weights,
         "save_results": args.save_results,
+        "strict_load": args.strict_load if args.strict_load is not None else True,
         "save_dir": coalesce(checkpoint_cfg.get("save_dir"), "runs/dense_det"),
         "benchmark": benchmark_cfg,
     }
@@ -265,7 +268,14 @@ def main():
             if args.weights == "ema" or (args.weights == "auto" and checkpoint.get("ema") is not None)
             else "model"
         )
-        model.load_state_dict(checkpoint[state_key])
+        if args.strict_load:
+            model.load_state_dict(checkpoint[state_key])
+        else:
+            missing, unexpected = model.load_state_dict(checkpoint[state_key], strict=False)
+            if missing:
+                print(f"Warning: {len(missing)} missing keys (first 5): {missing[:5]}")
+            if unexpected:
+                print(f"Warning: {len(unexpected)} unexpected keys (first 5): {unexpected[:5]}")
         print(f"Loaded checkpoint: {args.checkpoint} ({state_key} weights)")
     else:
         print("No checkpoint, evaluating random weights only")
