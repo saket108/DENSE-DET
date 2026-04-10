@@ -37,6 +37,7 @@ from utils.detection_metrics import (
     print_results,
     summarize_metrics,
 )
+from utils.efficiency_utils import apply_inference_efficiency, to_channels_last
 from utils.runtime import (
     coalesce,
     load_yaml_config,
@@ -86,6 +87,13 @@ def parse_args():
     parser.add_argument("--batch",        type=int, default=None)
     parser.add_argument("--imgsz",        type=int, default=None)
     parser.add_argument("--workers",      type=int, default=None)
+    parser.add_argument("--channels_last",    dest="use_channels_last", action="store_true")
+    parser.add_argument("--no_channels_last", dest="use_channels_last", action="store_false")
+    parser.add_argument("--compile_model",    dest="use_compile_model", action="store_true")
+    parser.add_argument("--no_compile_model", dest="use_compile_model", action="store_false")
+    parser.add_argument("--compile_mode", type=str, default=None)
+    parser.add_argument("--fuse_bn",    dest="use_fuse_bn", action="store_true")
+    parser.add_argument("--no_fuse_bn", dest="use_fuse_bn", action="store_false")
     parser.add_argument("--max_batches",  type=int, default=None)
     parser.add_argument("--num_classes",  type=int, default=None)
     parser.add_argument("--variant",      type=str, default=None)
@@ -130,6 +138,9 @@ def parse_args():
         use_quality_head=None,
         use_class_conditional_gn=None,
         use_auxiliary_heads=None,
+        use_channels_last=None,
+        use_compile_model=None,
+        use_fuse_bn=None,
         use_polarized_attention=None,
         use_gradient_preservation_neck=None,
     )
@@ -179,6 +190,7 @@ def resolve_args(args):
     data_cfg  = config_section(config, "data")
     train_cfg = config_section(config, "train")
     eval_cfg  = config_section(config, "eval")
+    efficiency_cfg = config_section(config, "efficiency")
 
     data_format = coalesce(args.data_format, data_cfg.get("format"), "detection")
     class_names = normalize_class_names(data_cfg.get("class_names"))
@@ -244,6 +256,14 @@ def resolve_args(args):
         "batch":    coalesce(args.batch, eval_cfg.get("batch_size"), train_cfg.get("batch_size"), 8),
         "imgsz":    coalesce(args.imgsz, train_cfg.get("image_size"), data_cfg.get("image_size"), 640),
         "workers":  args.workers if args.workers is not None else coalesce(train_cfg.get("num_workers"), 0),
+        "use_channels_last": coalesce(
+            args.use_channels_last, efficiency_cfg.get("channels_last"), False,
+        ),
+        "use_compile_model": coalesce(
+            args.use_compile_model, efficiency_cfg.get("compile_model"), False,
+        ),
+        "compile_mode": coalesce(args.compile_mode, efficiency_cfg.get("compile_mode"), "reduce-overhead"),
+        "use_fuse_bn": coalesce(args.use_fuse_bn, efficiency_cfg.get("fuse_bn"), False),
         "max_batches": args.max_batches,
         "num_classes": num_classes,
         "class_names": class_names,
@@ -361,6 +381,7 @@ def run_dense_evaluation(
     max_batches=None,
     verbose=True,
     progress_label=None,
+    use_channels_last: bool = False,
 ):
     model.eval()
     all_preds:   list[dict] = []
@@ -385,6 +406,8 @@ def run_dense_evaluation(
             break
 
         images      = images.to(device)
+        if use_channels_last:
+            images = to_channels_last(images)
         predictions = model.predict(images, conf_threshold=conf_thresh, nms_iou=nms_iou)
 
         for pred, target in zip(predictions, targets):
@@ -462,6 +485,9 @@ def main():
     print(f"Conf          : {args.conf}")
     print(f"Match IoU     : {args.iou_thresh}")
     print(f"NMS IoU       : {args.nms_iou}")
+    print(f"Eff. NHWC     : {args.use_channels_last}")
+    print(f"Eff. compile  : {args.use_compile_model}  mode={args.compile_mode}")
+    print(f"Eff. fuse BN  : {args.use_fuse_bn}")
 
     print("\nBuilding DenseDet...")
     model = DenseDet(**build_model_config(args)).to(device)
@@ -472,6 +498,15 @@ def main():
         print(f"Loaded checkpoint: {args.checkpoint} ({state_key} weights)")
     else:
         print("No checkpoint — evaluating random weights only")
+
+    model = apply_inference_efficiency(
+        model,
+        device,
+        use_channels_last=args.use_channels_last,
+        use_compile=args.use_compile_model,
+        fuse_bn=args.use_fuse_bn,
+        compile_mode=args.compile_mode,
+    )
 
     loader = build_val_loader(
         json_path=args.json_path,
@@ -492,6 +527,7 @@ def main():
         match_iou=args.iou_thresh,
         nms_iou=args.nms_iou,
         max_batches=args.max_batches,
+        use_channels_last=args.use_channels_last,
     )
 
     print_results(ap50, ap5095, pr_metrics, summary,

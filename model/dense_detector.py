@@ -26,6 +26,7 @@ from model.novel_blocks import (
     GradientPreservationNeck,
 )
 from model.novel_accuracy_blocks import CCGNConvBlock, SpectralChannelAttention
+from model.prism_backbone import PRISMBackbone
 from model.vst_backbone import VSTBackbone
 from utils.box_ops import distance_to_boxes, xyxy_abs_to_cxcywh_norm
 from utils.points import build_points
@@ -40,6 +41,12 @@ BACKBONE_ALIASES = {
     "vst_large": "vst_large",
     "vst_custom": "vst_custom",
     "custom": "vst_custom",
+    "prism": "prism",
+    "prism_s": "prism",
+    "prism_small": "prism",
+    "prism_l": "prism_large",
+    "prism_large": "prism_large",
+    "prism_custom": "prism_custom",
 }
 
 VST_PRESETS = {
@@ -50,6 +57,17 @@ VST_PRESETS = {
     "vst_large": {
         "dims": (60, 120, 240, 480),
         "depths": (2, 2, 4, 2),
+    },
+}
+
+PRISM_PRESETS = {
+    "prism": {
+        "dims": (16, 32, 64, 128),
+        "depths": (2, 2, 4, 2),
+    },
+    "prism_large": {
+        "dims": (32, 64, 128, 256),
+        "depths": (2, 2, 6, 2),
     },
 }
 
@@ -231,10 +249,15 @@ def build_backbone(
     if (dims is None) != (depths is None):
         raise ValueError("backbone_dims and backbone_depths must be provided together.")
 
+    is_prism = resolved_name.startswith("prism")
+
     if dims is not None and depths is not None:
         dims = tuple(int(value) for value in dims)
         depths = tuple(int(value) for value in depths)
-        backbone = VSTBackbone(dims=dims, depths=depths, block_type=block_type)
+        if is_prism:
+            backbone = PRISMBackbone(dims=dims, depths=depths)
+        else:
+            backbone = VSTBackbone(dims=dims, depths=depths, block_type=block_type)
     elif resolved_name in VST_PRESETS:
         preset = VST_PRESETS[resolved_name]
         backbone = VSTBackbone(
@@ -242,18 +265,24 @@ def build_backbone(
             depths=preset["depths"],
             block_type=block_type,
         )
+    elif resolved_name in PRISM_PRESETS:
+        preset = PRISM_PRESETS[resolved_name]
+        backbone = PRISMBackbone(
+            dims=preset["dims"],
+            depths=preset["depths"],
+        )
     else:
-        supported = ", ".join(sorted(VST_PRESETS))
+        supported = ", ".join(sorted(set(VST_PRESETS) | set(PRISM_PRESETS) | {"vst_custom", "prism_custom"}))
         raise ValueError(
-            f"Unsupported backbone '{model_name}'. DenseDet is configured for VST only. "
+            f"Unsupported backbone '{model_name}'. "
             f"Supported preset names: {supported}. "
-            "For a custom VST layout, provide backbone_dims and backbone_depths."
+            "For a custom layout, provide backbone_dims and backbone_depths."
         )
 
     if pretrained_path:
         _load_backbone_weights(backbone, pretrained_path)
     elif pretrained:
-        print("  VST backbone uses random initialization only (ignoring pretrained_backbone=True)")
+        print("  Backbone uses random initialization only (ignoring pretrained_backbone=True)")
     return backbone
 
 

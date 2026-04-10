@@ -48,6 +48,7 @@ from evaluate_dense import run_dense_evaluation
 from model.dense_detector import DenseDet
 from training.dense_loss import DenseDetectionLoss
 from utils.detection_metrics import mean_metric
+from utils.efficiency_utils import apply_training_efficiency, to_channels_last
 from utils.runtime import (
     coalesce,
     load_yaml_config,
@@ -179,7 +180,7 @@ class ModelEMA:
 
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
-        model_state = model.state_dict()
+        model_state = unwrap_model(model).state_dict()
         ema_state = self.ema.state_dict()
         for key, ema_value in ema_state.items():
             model_value = model_state[key].detach()
@@ -193,6 +194,10 @@ class ModelEMA:
 
     def load_state_dict(self, state_dict: dict[str, torch.Tensor]) -> None:
         self.ema.load_state_dict(state_dict)
+
+
+def unwrap_model(model: nn.Module) -> nn.Module:
+    return getattr(model, "_orig_mod", model)
 
 
 def config_section(config, key):
@@ -220,6 +225,7 @@ def parse_args():
     parser.add_argument("--epochs",    type=int,   default=None)
     parser.add_argument("--patience",  type=int,   default=None)
     parser.add_argument("--batch",     type=int,   default=None)
+    parser.add_argument("--accumulation_steps", type=int, default=None)
     parser.add_argument("--lr",        type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=None)  # FIX-1
     parser.add_argument("--imgsz",     type=int,   default=None)
@@ -249,6 +255,21 @@ def parse_args():
     parser.add_argument("--augment_erasing_prob",       type=float, default=None)
     parser.add_argument("--warmup_epochs", type=int,   default=None)
     parser.add_argument("--min_lr_ratio",  type=float, default=None)
+    parser.add_argument("--channels_last",    dest="use_channels_last", action="store_true")
+    parser.add_argument("--no_channels_last", dest="use_channels_last", action="store_false")
+    parser.add_argument("--compile_model",    dest="use_compile_model", action="store_true")
+    parser.add_argument("--no_compile_model", dest="use_compile_model", action="store_false")
+    parser.add_argument(
+        "--backbone_gradient_checkpointing",
+        dest="use_backbone_gradient_checkpointing",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no_backbone_gradient_checkpointing",
+        dest="use_backbone_gradient_checkpointing",
+        action="store_false",
+    )
+    parser.add_argument("--compile_mode", type=str, default=None)
     parser.add_argument("--ema",    dest="use_ema", action="store_true")
     parser.add_argument("--no_ema", dest="use_ema", action="store_false")
     parser.add_argument("--ema_decay", type=float, default=None)
@@ -307,6 +328,8 @@ def parse_args():
         use_class_conditional_gn=None,
         use_gradient_preservation_neck=None,
         use_uncertainty_weighted_varifocal=None,
+        use_channels_last=None, use_compile_model=None,
+        use_backbone_gradient_checkpointing=None,
         augment=None, balanced_sampler=None, use_ema=None,
     )
     return parser.parse_args()
@@ -326,6 +349,7 @@ def resolve_args(args):
     eval_cfg       = config_section(config, "eval")
     loss_cfg       = config_section(config, "loss")
     augmentation_cfg = config_section(config, "augmentation")
+    efficiency_cfg = config_section(config, "efficiency")
 
     data_format = coalesce(args.data_format, data_cfg.get("format"), "detection")
     class_names = normalize_class_names(data_cfg.get("class_names"))
@@ -371,6 +395,7 @@ def resolve_args(args):
         "epochs":   coalesce(args.epochs,   train_cfg.get("epochs"),    300),
         "patience": coalesce(args.patience, train_cfg.get("patience"),  0),
         "batch":    coalesce(args.batch,    train_cfg.get("batch_size"), 8),
+        "accumulation_steps": coalesce(args.accumulation_steps, train_cfg.get("accumulation_steps"), 1),
         "eval_batch": coalesce(eval_cfg.get("batch_size"), args.batch, train_cfg.get("batch_size"), 8),
         "lr": coalesce(args.lr, optimizer_cfg.get("lr"), 4e-4),
         # FIX-1: read weight_decay from config, not hardcoded
@@ -392,6 +417,18 @@ def resolve_args(args):
         "augment_erasing_prob":   coalesce(args.augment_erasing_prob,   augmentation_cfg.get("erasing_prob"),   0.4),
         "warmup_epochs": coalesce(args.warmup_epochs, scheduler_cfg.get("warmup_epochs"), 10),
         "min_lr_ratio":  coalesce(args.min_lr_ratio,  scheduler_cfg.get("eta_min_ratio"), 0.01),
+        "use_channels_last": coalesce(
+            args.use_channels_last, efficiency_cfg.get("channels_last"), False,
+        ),
+        "use_compile_model": coalesce(
+            args.use_compile_model, efficiency_cfg.get("compile_model"), False,
+        ),
+        "use_backbone_gradient_checkpointing": coalesce(
+            args.use_backbone_gradient_checkpointing,
+            efficiency_cfg.get("backbone_gradient_checkpointing"),
+            False,
+        ),
+        "compile_mode": coalesce(args.compile_mode, efficiency_cfg.get("compile_mode"), "reduce-overhead"),
         "use_ema":       coalesce(args.use_ema, train_cfg.get("use_ema"), True),
         "ema_decay":     coalesce(args.ema_decay, train_cfg.get("ema_decay"), 0.9998),
         # FIX-4: KL annealing
@@ -569,7 +606,7 @@ def save_checkpoint(
     path = os.path.join(save_dir, f"dense_det_{tag}.pt")
     torch.save(
         {
-            "epoch": epoch, "model": model.state_dict(),
+            "epoch": epoch, "model": unwrap_model(model).state_dict(),
             "ema": None if ema is None else ema.state_dict(),
             "ema_decay": ema_decay,
             "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
@@ -594,12 +631,14 @@ def format_metric(value, digits=4):
 
 def train_one_epoch(
     model, loader, optimizer, loss_fn, scaler, device, epoch,
-    total_epochs=None, save_every_batches=0, checkpoint_callback=None, ema=None,
+    total_epochs=None, save_every_batches=0, checkpoint_callback=None,
+    ema=None, accumulation_steps: int = 1, use_channels_last: bool = False,
 ):
     model.train()
     total_loss = 0.0
     processed_batches = 0
     n_batches = len(loader)
+    accumulation_steps = max(int(accumulation_steps), 1)
     iterator = loader
     progress = None
 
@@ -612,50 +651,59 @@ def train_one_epoch(
         )
         iterator = progress
 
+    optimizer.zero_grad(set_to_none=True)
+
     for i, (images, targets, _) in enumerate(iterator):
         images = images.to(device)
-        optimizer.zero_grad(set_to_none=True)
+        if use_channels_last:
+            images = to_channels_last(images)
+
+        window_start = (i // accumulation_steps) * accumulation_steps
+        window_end = min(window_start + accumulation_steps, n_batches)
+        current_window_size = max(window_end - window_start, 1)
+        loss_scale = 1.0 / float(current_window_size)
 
         with amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
             outputs = model(images)
             losses  = loss_fn(outputs, targets)
-            loss    = losses.total
+            loss    = losses.total * loss_scale
 
         if not torch.isfinite(loss.detach()):
             if progress is not None:
                 progress.write(f"  Skipping non-finite loss at epoch {epoch}, step {i+1}/{n_batches}")
+            optimizer.zero_grad(set_to_none=True)
             continue
 
         if device.type == "cuda":
             scaler.scale(loss).backward()
-            has_grad = any(
-                p.grad is not None for g in optimizer.param_groups for p in g["params"]
-            )
-            if not has_grad:
-                if progress is not None:
-                    progress.write(f"  Skipping no-grad batch at epoch {epoch}, step {i+1}/{n_batches}")
-                optimizer.zero_grad(set_to_none=True)
-                scaler.update()
-                continue
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
         else:
             loss.backward()
+
+        is_update_step = ((i + 1) % accumulation_steps == 0) or ((i + 1) == n_batches)
+        if is_update_step:
             has_grad = any(
                 p.grad is not None for g in optimizer.param_groups for p in g["params"]
             )
             if not has_grad:
                 optimizer.zero_grad(set_to_none=True)
+                if device.type == "cuda":
+                    scaler.update()
                 continue
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
 
-        if ema is not None:
-            ema.update(model)
+            if device.type == "cuda":
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
-        total_loss += loss.item()
+            if ema is not None:
+                ema.update(model)
+            optimizer.zero_grad(set_to_none=True)
+
+        total_loss += losses.total.item()
         processed_batches += 1
         avg = total_loss / max(processed_batches, 1)
 
@@ -664,6 +712,7 @@ def train_one_epoch(
                 "loss": f"{avg:.4f}", "cls": f"{losses.cls.item():.3f}",
                 "box": f"{losses.box.item():.3f}", "qual": f"{losses.qual.item():.3f}",
                 "lr": f"{optimizer.param_groups[0]['lr']:.2e}",
+                "acc": f"{((i % accumulation_steps) + 1)}/{accumulation_steps}",
             })
 
         if (
@@ -679,7 +728,7 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def validate(model, loader, loss_fn, device, epoch):
+def validate(model, loader, loss_fn, device, epoch, use_channels_last: bool = False):
     model.eval()
     total_loss = 0.0
     iterator = loader
@@ -694,6 +743,8 @@ def validate(model, loader, loss_fn, device, epoch):
 
     for batch_idx, (images, targets, _) in enumerate(iterator):
         images = images.to(device)
+        if use_channels_last:
+            images = to_channels_last(images)
         outputs = model(images)
         losses  = loss_fn(outputs, targets)
         total_loss += losses.total.item()
@@ -727,10 +778,17 @@ def main():
     print(f"Head type    : {args.head_type}")
     print(f"CCGN         : {args.use_class_conditional_gn}")
     print(f"Epochs       : {args.epochs}  patience={args.patience or 'off'}")
-    print(f"Batch        : {args.batch}   lr={args.lr}  wd={args.weight_decay}")  # FIX-1
+    print(
+        f"Batch        : {args.batch}   accum={args.accumulation_steps}   "
+        f"effective={args.batch * args.accumulation_steps}   "
+        f"lr={args.lr}  wd={args.weight_decay}"
+    )  # FIX-1
     print(f"Classes      : {args.num_classes}")
     print(f"Augment      : {args.augment}  close_after={args.close_augment_after_epochs}")
     print(f"EMA          : {args.use_ema}  decay={args.ema_decay}")
+    print(f"Eff. NHWC    : {args.use_channels_last}")
+    print(f"Eff. compile : {args.use_compile_model}  mode={args.compile_mode}")
+    print(f"Eff. GC      : {args.use_backbone_gradient_checkpointing}")
     print(f"KL anneal ep : {args.evidential_kl_anneal_epochs}")  # FIX-4
     print(f"Box loss     : {args.box_loss_type}")
     print(f"UW-VFL       : {args.use_uncertainty_weighted_varifocal}")
@@ -801,7 +859,7 @@ def main():
 
     if args.resume:
         ckpt = resume_ckpt or torch.load(args.resume, map_location=device)
-        model.load_state_dict(ckpt["model"])
+        unwrap_model(model).load_state_dict(ckpt["model"])
         if ema is not None:
             ema_state = ckpt.get("ema")
             if ema_state is not None:
@@ -824,6 +882,18 @@ def main():
             else (-float(best_val) if args.checkpoint_metric == "val_loss" else float("-inf"))
         )
         epochs_without_improvement = int(ckpt.get("epochs_without_improvement", 0))
+
+    if args.use_channels_last and ema is not None:
+        ema.ema = ema.ema.to(memory_format=torch.channels_last)
+
+    model = apply_training_efficiency(
+        model,
+        device,
+        use_channels_last=args.use_channels_last,
+        use_compile=args.use_compile_model,
+        use_gc=args.use_backbone_gradient_checkpointing,
+        compile_mode=args.compile_mode,
+    )
 
     print(f"\nStarting training for {args.epochs} epochs...")
     os.makedirs(args.save_dir, exist_ok=True)
@@ -871,9 +941,14 @@ def main():
             model, train_loader, optimizer, loss_fn, scaler, device, epoch,
             total_epochs=args.epochs, save_every_batches=args.save_every_batches,
             checkpoint_callback=checkpoint_callback, ema=ema,
+            accumulation_steps=args.accumulation_steps,
+            use_channels_last=args.use_channels_last,
         )
         eval_model = ema.ema if ema is not None else model
-        val_loss = validate(eval_model, val_loader, loss_fn, device, epoch)
+        val_loss = validate(
+            eval_model, val_loader, loss_fn, device, epoch,
+            use_channels_last=args.use_channels_last,
+        )
         map50 = map5095 = ""
         summary = None
 
@@ -883,6 +958,7 @@ def main():
                 conf_thresh=args.eval_conf, match_iou=args.eval_iou,
                 nms_iou=args.eval_nms_iou, max_batches=args.eval_max_batches,
                 verbose=False, progress_label=f"Eval {epoch}/{args.epochs}",
+                use_channels_last=args.use_channels_last,
             )
             map50   = mean_metric(list(ap50.values()))
             map5095 = mean_metric(list(ap5095.values()))

@@ -1,5 +1,6 @@
 model:
   variant: small
+  # Ablation: set backbone_name: prism or prism_custom to use PRISMBackbone.
   backbone_name: vst_custom
   backbone_dims: [16, 32, 64, 128]
   backbone_depths: [2, 2, 4, 2]
@@ -33,7 +34,8 @@ data:
 train:
   epochs: 80
   patience: 15
-  batch_size: 8
+  batch_size: 2
+  accumulation_steps: 8
   num_workers: 0
   image_size: 640
   balanced_sampler: true
@@ -50,6 +52,13 @@ optimizer:
 scheduler:
   warmup_epochs: 10
   eta_min_ratio: 0.01
+
+efficiency:
+  channels_last: false
+  compile_model: false
+  backbone_gradient_checkpointing: false
+  compile_mode: reduce-overhead
+  fuse_bn: false
 
 loss:
   assigner: atss
