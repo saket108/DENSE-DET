@@ -1,0 +1,19 @@
+# Quick eval data config for testing
+# This is a minimal config for testing the quick_eval_dense.py script
+# Replace with actual paths when you have real data
+
+path: "data"  # Relative to project root, or absolute path
+
+# For detection format (folders with images/labels)
+val: "images/val"      # validation images folder
+val_labels: "labels/val"  # validation labels folder
+
+# Class configuration
+names:
+  - crack
+  - dent
+  - corrosion
+  - scratch
+  - missing-head
+  - paint-peel-off
+nc: 6

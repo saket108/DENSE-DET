@@ -1,0 +1,89 @@
+# Quick training configuration for rapid block iteration.
+# Designed for fast training cycles with minimal epochs and smaller models.
+
+model:
+  variant: tiny  # Smaller for faster iteration
+  backbone_name: vst_custom
+  backbone_dims: [16, 32, 64, 128]
+  backbone_depths: [2, 2, 4, 2]
+  neck_name: cafpn_p2
+  head_depth: 1
+  use_detail_branch: true
+  stem_type: standard
+  backbone_block: anisotropic_strip
+  refine_block: dilated
+  head_type: dense
+  use_quality_head: false  # Skip for speed
+  use_class_conditional_gn: false
+  use_auxiliary_heads: false  # Skip for speed
+  use_polarized_attention: false
+  pretrained_backbone: false
+
+data:
+  format: detection
+  num_classes: 6
+  class_names:
+    - crack
+    - dent
+    - corrosion
+    - scratch
+    - missing-head
+    - paint-peel-off
+  image_size: 640
+
+train:
+  epochs: 5  # Quick iteration
+  patience: 3
+  batch_size: 4  # Small batch for testing
+  accumulation_steps: 2
+  num_workers: 0
+  image_size: 640
+  balanced_sampler: true
+  use_ema: false  # Skip for speed
+
+optimizer:
+  lr: 0.001  # Higher LR for faster training
+  weight_decay: 0.001
+
+scheduler:
+  warmup_epochs: 1
+  eta_min_ratio: 0.01
+
+efficiency:
+  channels_last: false
+  compile_model: false
+  backbone_gradient_checkpointing: false
+  compile_mode: reduce-overhead
+  fuse_bn: false
+
+loss:
+  assigner: fcos
+  box_loss: giou
+  quality: 1.0
+  auxiliary: 0.0
+  uncertainty_weighted_varifocal: false
+
+augmentation:
+  enabled: true
+  close_after_epochs: 3
+  fliplr: 0.3
+  hsv_h: 0.0
+  hsv_s: 0.0
+  hsv_v: 0.0
+  blur_prob: 0.0
+  grayscale_prob: 0.0
+  equalize_prob: 0.0
+  erasing_prob: 0.0
+
+eval:
+  batch_size: 8
+  conf_thresh: 0.25
+  iou_thresh: 0.5
+  nms_iou: 0.6
+  during_train_every_epochs: 1  # Eval every epoch
+  during_train_max_batches: 10  # Only ~10 batches per eval
+  checkpoint_metric: map50
+
+checkpoint:
+  save_dir: runs/dense_det_quick
+  save_period_batches: 0
