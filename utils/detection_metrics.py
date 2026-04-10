@@ -128,7 +128,7 @@ def evaluate_predictions(
                 is_tp = 0
 
                 # Find best unmatched GT for this prediction
-                row_ious = ious[pred_idx]                # [n_gt_img]
+                row_ious = ious[pred_idx].clone()        # [n_gt_img]
                 row_ious[matched] = -1.0                 # mask already-matched GTs
                 best_iou, best_j = row_ious.max(0)
 
