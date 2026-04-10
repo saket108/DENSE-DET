@@ -22,7 +22,7 @@ except ImportError:
     tqdm = None
 
 from data.loader import DetectionAugmenter, build_train_loader, build_val_loader
-from evaluate_dense import run_dense_evaluation
+from evaluate_dense import print_benchmark_comparison, run_dense_evaluation
 from model.dense_detector import DenseDet
 from training.dense_loss import DenseDetectionLoss
 from utils.detection_metrics import mean_metric
@@ -175,6 +175,7 @@ def resolve_args(args):
     eval_cfg = config_section(config, "eval")
     loss_cfg = config_section(config, "loss")
     augmentation_cfg = config_section(config, "augmentation")
+    benchmark_cfg = config_section(config, "benchmark")
 
     train_paths = resolve_detection_paths(args.data_config, args.dataset_root, "train", args.train_images, args.train_labels)
     val_paths = resolve_detection_paths(args.data_config, train_paths["dataset_root"], "val", args.val_images, args.val_labels)
@@ -205,6 +206,7 @@ def resolve_args(args):
         "eval_conf": coalesce(args.eval_conf, eval_cfg.get("conf_thresh"), 0.05),
         "eval_iou": coalesce(args.eval_iou, eval_cfg.get("iou_thresh"), 0.5),
         "eval_nms_iou": coalesce(args.eval_nms_iou, eval_cfg.get("nms_iou"), 0.6),
+        "eval_max_det": coalesce(eval_cfg.get("max_det"), 300),
         "checkpoint_metric": coalesce(args.checkpoint_metric, eval_cfg.get("checkpoint_metric"), "map50_95"),
         "balanced_sampler": coalesce(args.balanced_sampler, train_cfg.get("balanced_sampler"), True),
         "augment": coalesce(args.augment, augmentation_cfg.get("enabled"), True),
@@ -231,6 +233,7 @@ def resolve_args(args):
         "use_quality_head": coalesce(args.use_quality_head, model_cfg.get("use_quality_head"), True),
         "assigner": coalesce(loss_cfg.get("assigner"), "atss"),
         "quality_loss_weight": coalesce(loss_cfg.get("quality"), 1.0),
+        "benchmark": benchmark_cfg,
     }
     require_existing_paths(train_images=resolved["train_images"], val_images=resolved["val_images"], train_labels=resolved["train_labels"], val_labels=resolved["val_labels"])
     return argparse.Namespace(**resolved)
@@ -312,7 +315,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
         total_loss += losses.total.item()
         processed_batches += 1
         if progress is not None:
-            progress.set_postfix({"loss": f"{total_loss / processed_batches:.4f}", "cls": f"{losses.cls.item():.3f}", "box": f"{losses.box.item():.3f}", "qual": f"{losses.qual.item():.3f}", "lr": f"{optimizer.param_groups[0]['lr']:.2e}", "acc": f"{((batch_index % accumulation_steps) + 1)}/{accumulation_steps}"})
+            progress.set_postfix({"loss": f"{total_loss / processed_batches:.4f}", "cls": f"{losses.cls.item():.3f}", "box": f"{losses.box.item():.3f}", "qual": f"{losses.qual.item():.3f}", "pos": losses.positives, "lr": f"{optimizer.param_groups[0]['lr']:.2e}", "acc": f"{((batch_index % accumulation_steps) + 1)}/{accumulation_steps}"})
     if progress is not None:
         progress.close()
     return total_loss / max(processed_batches, 1)
@@ -411,14 +414,15 @@ def main():
         if hasattr(train_loader.dataset, "augmenter") and train_loader.dataset.augmenter is not None:
             train_loader.dataset.augmenter.set_epoch(epoch)
         train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, scaler, device, epoch, total_epochs=args.epochs, ema=ema, accumulation_steps=args.accumulation_steps, use_mixed_precision=args.use_mixed_precision)
-        eval_model = ema.ema if ema is not None else model
+        eval_model = ema.ema if ema is not None and epoch > args.warmup_epochs else model
         val_loss = validate(eval_model, val_loader, loss_fn, device, epoch)
         map50 = map5095 = ""
         summary = None
         if args.eval_every_epochs and epoch % args.eval_every_epochs == 0:
-            ap50, ap5095, pr_metrics, summary = run_dense_evaluation(eval_model, val_loader, device, num_classes=args.num_classes, conf_thresh=args.eval_conf, match_iou=args.eval_iou, nms_iou=args.eval_nms_iou, max_batches=args.eval_max_batches, verbose=False, progress_label=f"Eval {epoch}/{args.epochs}")
+            ap50, ap5095, pr_metrics, summary = run_dense_evaluation(eval_model, val_loader, device, num_classes=args.num_classes, conf_thresh=args.eval_conf, match_iou=args.eval_iou, nms_iou=args.eval_nms_iou, max_batches=args.eval_max_batches, max_det=args.eval_max_det, verbose=False, progress_label=f"Eval {epoch}/{args.epochs}")
             map50 = mean_metric(list(ap50.values()))
             map5095 = mean_metric(list(ap5095.values()))
+            print_benchmark_comparison(ap50, ap5095, pr_metrics, summary, args.benchmark, args.class_names)
         scheduler.step()
         elapsed = time.time() - t0
         if val_loss < best_val:

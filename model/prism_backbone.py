@@ -62,44 +62,50 @@ class SequentialAsymmetricStrip(nn.Module):
         return F.gelu(self.bn_v(self.dw_v(x)))
 
 
-class LocalDisorderBlock(nn.Module):
-    """PRISM block with analytical routing between efficient and expressive paths."""
+class DisorderBottleneckBlock(nn.Module):
+    """PRISM-native bottleneck with analytical texture routing.
+
+    The block first compresses channels, processes the compressed tensor with
+    two cheap spatial paths, then expands back to the original width. The
+    routing gate is computed from local variance of the input, so texture-heavy
+    regions prefer the strip path while smoother regions prefer the 3x3 path.
+    """
 
     def __init__(
         self,
         dim: int,
         strip_k: int = 7,
-        expansion: int = 2,
+        bottleneck_ratio: float = 0.5,
         disorder_kernel: int = 3,
     ) -> None:
         super().__init__()
         self.disorder_kernel = disorder_kernel
-        hidden = _snap16(dim * expansion)
+        hidden = min(dim, _snap16(int(dim * bottleneck_ratio)))
 
-        self.eff = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim, bias=False),
-            nn.GroupNorm(_group_count(dim), dim),
-        )
-        self.exp = SequentialAsymmetricStrip(dim, strip_k=strip_k)
-        self.blend_pw = nn.Sequential(
-            nn.Conv2d(dim, dim, 1, bias=False),
-            nn.GroupNorm(_group_count(dim), dim),
-        )
-        self.ffn = nn.Sequential(
+        self.reduce = nn.Sequential(
             nn.Conv2d(dim, hidden, 1, bias=False),
+            nn.GroupNorm(_group_count(hidden), hidden),
             nn.GELU(),
+        )
+        self.local = nn.Sequential(
+            nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False),
+            nn.GroupNorm(_group_count(hidden), hidden),
+        )
+        self.strip = SequentialAsymmetricStrip(hidden, strip_k=strip_k)
+        self.expand = nn.Sequential(
             nn.Conv2d(hidden, dim, 1, bias=False),
             nn.GroupNorm(_group_count(dim), dim),
         )
-        self.ls1 = nn.Parameter(torch.full((dim, 1, 1), 1e-2))
-        self.ls2 = nn.Parameter(torch.full((dim, 1, 1), 1e-2))
+        self.layer_scale = nn.Parameter(torch.full((dim, 1, 1), 1e-2))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate = _local_disorder(x, self.disorder_kernel)
-        mixed = gate * self.exp(x) + (1.0 - gate) * self.eff(x)
-        x = x + self.ls1 * self.blend_pw(mixed)
-        x = x + self.ls2 * self.ffn(x)
-        return x
+        z = self.reduce(x)
+        mixed = gate * self.strip(z) + (1.0 - gate) * self.local(z)
+        return x + self.layer_scale * self.expand(mixed)
+
+
+LocalDisorderBlock = DisorderBottleneckBlock
 
 
 class PixelUnshuffleDownsample(nn.Module):
@@ -142,7 +148,7 @@ class PRISMBackbone(nn.Module):
         dims: tuple[int, int, int, int] = (16, 32, 64, 128),
         depths: tuple[int, int, int, int] = (2, 2, 4, 2),
         strip_k: int = 7,
-        expansion: int = 2,
+        bottleneck_ratio: float = 0.5,
         use_gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
@@ -168,7 +174,11 @@ class PRISMBackbone(nn.Module):
             self.stages.append(
                 nn.Sequential(
                     *[
-                        LocalDisorderBlock(dims[index], strip_k=strip_k, expansion=expansion)
+                        DisorderBottleneckBlock(
+                            dims[index],
+                            strip_k=strip_k,
+                            bottleneck_ratio=bottleneck_ratio,
+                        )
                         for _ in range(self.depths[index])
                     ]
                 )
