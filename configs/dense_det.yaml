@@ -1,6 +1,5 @@
 model:
   variant: small
-  # Ablation: set backbone_name: prism or prism_custom to use PRISMBackbone.
   backbone_name: vst_custom
   backbone_dims: [16, 32, 64, 128]
   backbone_depths: [2, 2, 4, 2]
@@ -34,9 +33,12 @@ data:
 train:
   epochs: 80
   patience: 15
-  batch_size: 2
-  accumulation_steps: 8
-  num_workers: 0
+  # Physical batch size (keep low to avoid OOM)
+  batch_size: 2 
+  # Accumulation steps (2 * 8 = 16 effective batch size)
+  accumulation_steps: 8 
+  # Requested workers
+  num_workers: 4 
   image_size: 640
   balanced_sampler: true
   use_ema: true
@@ -44,9 +46,6 @@ train:
 
 optimizer:
   lr: 0.0004
-  # FIX: was ignored in original (hardcoded 0.0005 in train_dense.py).
-  # Now read correctly. 0.05 is standard for AdamW on ViT-style models;
-  # for conv-heavy detectors 0.01 is also common. Set based on your model.
   weight_decay: 0.01
 
 scheduler:
@@ -54,9 +53,11 @@ scheduler:
   eta_min_ratio: 0.01
 
 efficiency:
-  channels_last: false
+  # Switched to true for faster processing on newer GPUs
+  channels_last: true 
   compile_model: false
-  backbone_gradient_checkpointing: false
+  # ENABLED: This saves a massive amount of VRAM by recomputing gradients
+  backbone_gradient_checkpointing: true 
   compile_mode: reduce-overhead
   fuse_bn: false
 
@@ -66,9 +67,6 @@ loss:
   quality: 1.0
   auxiliary: 0.25
   uncertainty_weighted_varifocal: true
-  # FIX: added for EvidentialQualityHead KL annealing.
-  # Set to 0 to disable (pure NLL), or ~20 to anneal KL weight from 0→1
-  # over the first 20 epochs. Only has effect with EvidentialQualityHead.
   evidential_kl_anneal_epochs: 20
 
 augmentation:
@@ -84,7 +82,8 @@ augmentation:
   erasing_prob: 0.1
 
 eval:
-  batch_size: 8
+  # Validation can usually handle a higher batch size than training
+  batch_size: 8 
   conf_thresh: 0.25
   iou_thresh: 0.5
   nms_iou: 0.6
