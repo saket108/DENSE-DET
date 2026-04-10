@@ -273,6 +273,8 @@ def parse_args():
     parser.add_argument("--ema",    dest="use_ema", action="store_true")
     parser.add_argument("--no_ema", dest="use_ema", action="store_false")
     parser.add_argument("--ema_decay", type=float, default=None)
+    parser.add_argument("--mixed_precision",    dest="use_mixed_precision", action="store_true")
+    parser.add_argument("--no_mixed_precision", dest="use_mixed_precision", action="store_false")
     # FIX-4: KL annealing epochs for EvidentialQualityHead
     parser.add_argument("--evidential_kl_anneal_epochs", type=int, default=None)
     parser.add_argument("--num_classes",   type=int, default=None)
@@ -330,6 +332,7 @@ def parse_args():
         use_uncertainty_weighted_varifocal=None,
         use_channels_last=None, use_compile_model=None,
         use_backbone_gradient_checkpointing=None,
+        use_mixed_precision=None,
         augment=None, balanced_sampler=None, use_ema=None,
     )
     return parser.parse_args()
@@ -431,6 +434,7 @@ def resolve_args(args):
         "compile_mode": coalesce(args.compile_mode, efficiency_cfg.get("compile_mode"), "reduce-overhead"),
         "use_ema":       coalesce(args.use_ema, train_cfg.get("use_ema"), True),
         "ema_decay":     coalesce(args.ema_decay, train_cfg.get("ema_decay"), 0.9998),
+        "use_mixed_precision": coalesce(args.use_mixed_precision, train_cfg.get("use_mixed_precision"), False),
         # FIX-4: KL annealing
         "evidential_kl_anneal_epochs": coalesce(
             args.evidential_kl_anneal_epochs, loss_cfg.get("evidential_kl_anneal_epochs"), 0,
@@ -633,6 +637,7 @@ def train_one_epoch(
     model, loader, optimizer, loss_fn, scaler, device, epoch,
     total_epochs=None, save_every_batches=0, checkpoint_callback=None,
     ema=None, accumulation_steps: int = 1, use_channels_last: bool = False,
+    use_mixed_precision: bool = False,
 ):
     model.train()
     total_loss = 0.0
@@ -663,7 +668,7 @@ def train_one_epoch(
         current_window_size = max(window_end - window_start, 1)
         loss_scale = 1.0 / float(current_window_size)
 
-        with amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
+        with amp.autocast(device_type=device.type, enabled=use_mixed_precision):
             outputs = model(images)
             losses  = loss_fn(outputs, targets)
             loss    = losses.total * loss_scale
@@ -849,7 +854,7 @@ def main():
         optimizer, total_epochs=args.epochs,
         warmup_epochs=args.warmup_epochs, min_lr_ratio=args.min_lr_ratio,
     )
-    scaler = amp.GradScaler(device.type, enabled=(device.type == "cuda"))
+    scaler = amp.GradScaler(device.type, enabled=args.use_mixed_precision)
 
     start_epoch = 1
     best_val = float("inf")
@@ -943,6 +948,7 @@ def main():
             checkpoint_callback=checkpoint_callback, ema=ema,
             accumulation_steps=args.accumulation_steps,
             use_channels_last=args.use_channels_last,
+            use_mixed_precision=args.use_mixed_precision,
         )
         eval_model = ema.ema if ema is not None else model
         val_loss = validate(

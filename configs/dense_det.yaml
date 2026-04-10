@@ -1,20 +1,20 @@
 model:
-  variant: small
+  variant: tiny
   backbone_name: vst_custom
   backbone_dims: [16, 32, 64, 128]
-  backbone_depths: [2, 2, 4, 2]
+  backbone_depths: [1, 1, 2, 1]
   neck_name: cafpn_p2
   head_depth: 2
-  use_detail_branch: true
-  stem_type: frequency_decoupled
+  use_detail_branch: false
+  stem_type: detail
   backbone_block: anisotropic_strip
-  refine_block: adaptive_spectral
+  refine_block: dilated
   use_gradient_preservation_neck: false
-  use_quality_head: true
-  head_type: evidential
-  use_class_conditional_gn: true
-  use_auxiliary_heads: true
-  use_polarized_attention: true
+  use_quality_head: false
+  head_type: dense
+  use_class_conditional_gn: false
+  use_auxiliary_heads: false
+  use_polarized_attention: false
   pretrained_backbone: false
   pretrained_backbone_path: null
 
@@ -33,16 +33,17 @@ data:
 train:
   epochs: 80
   patience: 15
-  # Physical batch size (keep low to avoid OOM)
-  batch_size: 2 
-  # Accumulation steps (2 * 8 = 16 effective batch size)
-  accumulation_steps: 8 
+  # Physical batch size (increased for lighter model)
+  batch_size: 4 
+  # Accumulation steps (4 * 4 = 16 effective batch size)
+  accumulation_steps: 4 
   # Requested workers
   num_workers: 4 
   image_size: 640
   balanced_sampler: true
   use_ema: true
   ema_decay: 0.9998
+  use_mixed_precision: true
 
 optimizer:
   lr: 0.0004
