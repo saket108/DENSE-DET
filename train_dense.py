@@ -207,6 +207,7 @@ def resolve_args(args):
         "eval_iou": coalesce(args.eval_iou, eval_cfg.get("iou_thresh"), 0.5),
         "eval_nms_iou": coalesce(args.eval_nms_iou, eval_cfg.get("nms_iou"), 0.6),
         "eval_max_det": coalesce(eval_cfg.get("max_det"), 300),
+        "eval_use_ema": coalesce(eval_cfg.get("use_ema"), False),
         "checkpoint_metric": coalesce(args.checkpoint_metric, eval_cfg.get("checkpoint_metric"), "map50_95"),
         "balanced_sampler": coalesce(args.balanced_sampler, train_cfg.get("balanced_sampler"), True),
         "augment": coalesce(args.augment, augmentation_cfg.get("enabled"), True),
@@ -414,7 +415,11 @@ def main():
         if hasattr(train_loader.dataset, "augmenter") and train_loader.dataset.augmenter is not None:
             train_loader.dataset.augmenter.set_epoch(epoch)
         train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, scaler, device, epoch, total_epochs=args.epochs, ema=ema, accumulation_steps=args.accumulation_steps, use_mixed_precision=args.use_mixed_precision)
-        eval_model = ema.ema if ema is not None and epoch > args.warmup_epochs else model
+        eval_model = (
+            ema.ema
+            if args.eval_use_ema and ema is not None and epoch > args.warmup_epochs
+            else model
+        )
         val_loss = validate(eval_model, val_loader, loss_fn, device, epoch)
         map50 = map5095 = ""
         summary = None

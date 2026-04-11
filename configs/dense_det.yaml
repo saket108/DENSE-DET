@@ -59,6 +59,7 @@ eval:
   iou_thresh: 0.5
   nms_iou: 0.6
   max_det: 300
+  use_ema: false
   during_train_every_epochs: 5
   during_train_max_batches: null
   checkpoint_metric: map50_95
