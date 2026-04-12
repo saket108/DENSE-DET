@@ -46,12 +46,12 @@ augmentation:
   close_after_epochs: 35
   fliplr: 0.5
   hsv_h: 0.01
-  hsv_s: 0.3
-  hsv_v: 0.15
+  hsv_s: 0.2
+  hsv_v: 0.1
   blur_prob: 0.01
   grayscale_prob: 0.0
   equalize_prob: 0.01
-  erasing_prob: 0.05
+  erasing_prob: 0.02
 
 eval:
   batch_size: 8
@@ -60,8 +60,8 @@ eval:
   nms_iou: 0.6
   max_det: 300
   use_ema: false
-  during_train_every_epochs: 5
-  during_train_max_batches: null
+  during_train_every_epochs: 2
+  during_train_max_batches: 50
   checkpoint_metric: map50_95
 
 checkpoint:
