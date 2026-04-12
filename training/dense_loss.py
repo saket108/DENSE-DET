@@ -8,7 +8,14 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from utils.box_ops import box_iou, cxcywh_norm_to_xyxy_abs, distance_to_boxes, generalized_box_iou
+from utils.box_ops import (
+    box_iou,
+    box_iou_pairwise,
+    cxcywh_norm_to_xyxy_abs,
+    distance_to_boxes,
+    generalized_box_iou,
+    generalized_box_iou_pairwise,
+)
 from utils.points import build_points
 
 
@@ -160,11 +167,11 @@ class DenseDetectionLoss(nn.Module):
             if pos_mask.any():
                 pred_boxes_pos = distance_to_boxes(points[pos_mask], pred_box[batch_index][pos_mask])
                 target_boxes = assigned["boxes"][pos_mask]
-                iou_values = torch.diag(box_iou(pred_boxes_pos, target_boxes)).detach().clamp_(0.0, 1.0)
+                iou_values = box_iou_pairwise(pred_boxes_pos, target_boxes).detach().clamp_(0.0, 1.0)
                 cls_targets[pos_mask, assigned["labels"][pos_mask]] = iou_values
 
-                giou = generalized_box_iou(pred_boxes_pos, target_boxes)
-                box_loss = box_loss + (1.0 - torch.diag(giou)).sum()
+                giou_values = generalized_box_iou_pairwise(pred_boxes_pos, target_boxes)
+                box_loss = box_loss + (1.0 - giou_values).sum()
                 total_pos += int(pos_mask.sum().item())
 
                 if pred_qual is not None:

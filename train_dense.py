@@ -305,12 +305,14 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
             if device.type == "cuda":
                 scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            step_successful = None
             if device.type == "cuda":
-                scaler.step(optimizer)
+                step_successful = scaler.step(optimizer)
                 scaler.update()
             else:
                 optimizer.step()
-            if ema is not None:
+                step_successful = True
+            if step_successful is not None and ema is not None:
                 ema.update(model)
             optimizer.zero_grad(set_to_none=True)
         total_loss += losses.total.item()
@@ -323,15 +325,16 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
 
 
 @torch.no_grad()
-def validate(model, loader, loss_fn, device, epoch):
+def validate(model, loader, loss_fn, device, epoch, use_mixed_precision=True):
     model.eval()
     total_loss = 0.0
     progress = tqdm(loader, total=len(loader), desc=f"Val {epoch}", dynamic_ncols=True, leave=True, disable=(tqdm is None or not sys.stdout.isatty())) if tqdm else None
     iterator = progress or loader
     for batch_index, (images, targets, _) in enumerate(iterator):
         images = images.to(device, non_blocking=True)
-        outputs = model(images)
-        losses = loss_fn(outputs, targets)
+        with amp.autocast(device_type=device.type, enabled=(use_mixed_precision and device.type == "cuda")):
+            outputs = model(images)
+            losses = loss_fn(outputs, targets)
         total_loss += losses.total.item()
         if progress is not None:
             progress.set_postfix({"loss": f"{total_loss / (batch_index + 1):.4f}"})
@@ -420,7 +423,7 @@ def main():
             if args.eval_use_ema and ema is not None and epoch > args.warmup_epochs
             else model
         )
-        val_loss = validate(eval_model, val_loader, loss_fn, device, epoch)
+        val_loss = validate(eval_model, val_loader, loss_fn, device, epoch, use_mixed_precision=args.use_mixed_precision)
         map50 = map5095 = ""
         summary = None
         if args.eval_every_epochs and epoch % args.eval_every_epochs == 0:
@@ -441,7 +444,7 @@ def main():
         improved = checkpoint_score is not None and checkpoint_score > best_checkpoint_score
         if improved:
             best_checkpoint_score, best_epoch, epochs_without_improvement = float(checkpoint_score), epoch, 0
-        elif epoch > args.warmup_epochs:
+        elif epoch > args.warmup_epochs and summary is not None:
             epochs_without_improvement += 1
         macro_precision = None if summary is None else summary["macro_precision"]
         macro_recall = None if summary is None else summary["macro_recall"]

@@ -98,7 +98,7 @@ def print_prediction_diagnostics(all_preds, max_det):
             f"max={scores_t.max().item():.4f}"
         )
     if capped > 0:
-        print("  Note             : many images are hitting max_det; precision will be very noisy.")
+        print("  Note : many images are hitting max_det; precision will be very noisy.")
 
 
 def parse_args():

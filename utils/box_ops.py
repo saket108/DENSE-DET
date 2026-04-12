@@ -38,6 +38,23 @@ def box_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
     return inter / union.clamp(min=1e-6)
 
 
+def box_iou_pairwise(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    """Element-wise IoU for matched xyxy box pairs. Returns shape [N]."""
+    if boxes1.numel() == 0 or boxes2.numel() == 0:
+        return boxes1.new_zeros((boxes1.shape[0],))
+
+    inter_x1 = torch.max(boxes1[:, 0], boxes2[:, 0])
+    inter_y1 = torch.max(boxes1[:, 1], boxes2[:, 1])
+    inter_x2 = torch.min(boxes1[:, 2], boxes2[:, 2])
+    inter_y2 = torch.min(boxes1[:, 3], boxes2[:, 3])
+
+    inter = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(min=0)
+    area1 = (boxes1[:, 2] - boxes1[:, 0]).clamp(min=0) * (boxes1[:, 3] - boxes1[:, 1]).clamp(min=0)
+    area2 = (boxes2[:, 2] - boxes2[:, 0]).clamp(min=0) * (boxes2[:, 3] - boxes2[:, 1]).clamp(min=0)
+    union = area1 + area2 - inter
+    return inter / union.clamp(min=1e-6)
+
+
 def generalized_box_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
     """Generalized IoU for xyxy boxes.
 
@@ -71,6 +88,30 @@ def generalized_box_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Ten
 
     return iou - (enc_area - union) / enc_area.clamp(min=1e-6)
 
+
+def generalized_box_iou_pairwise(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    """Element-wise GIoU for matched xyxy box pairs. Returns shape [N]."""
+    if boxes1.numel() == 0 or boxes2.numel() == 0:
+        return boxes1.new_zeros((boxes1.shape[0],))
+
+    inter_x1 = torch.max(boxes1[:, 0], boxes2[:, 0])
+    inter_y1 = torch.max(boxes1[:, 1], boxes2[:, 1])
+    inter_x2 = torch.min(boxes1[:, 2], boxes2[:, 2])
+    inter_y2 = torch.min(boxes1[:, 3], boxes2[:, 3])
+    inter = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(min=0)
+
+    area1 = (boxes1[:, 2] - boxes1[:, 0]).clamp(min=0) * (boxes1[:, 3] - boxes1[:, 1]).clamp(min=0)
+    area2 = (boxes2[:, 2] - boxes2[:, 0]).clamp(min=0) * (boxes2[:, 3] - boxes2[:, 1]).clamp(min=0)
+    union = area1 + area2 - inter
+    iou = inter / union.clamp(min=1e-6)
+
+    enc_x1 = torch.min(boxes1[:, 0], boxes2[:, 0])
+    enc_y1 = torch.min(boxes1[:, 1], boxes2[:, 1])
+    enc_x2 = torch.max(boxes1[:, 2], boxes2[:, 2])
+    enc_y2 = torch.max(boxes1[:, 3], boxes2[:, 3])
+    enc_area = (enc_x2 - enc_x1).clamp(min=0) * (enc_y2 - enc_y1).clamp(min=0)
+
+    return iou - (enc_area - union) / enc_area.clamp(min=1e-6)
 
 def cxcywh_norm_to_xyxy_abs(boxes: torch.Tensor, image_h: int, image_w: int) -> torch.Tensor:
     """Convert normalized cxcywh boxes to absolute xyxy."""
