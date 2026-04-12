@@ -144,17 +144,20 @@ class DetectionAugmenter:
         self,
         image: Image.Image,
         boxes: torch.Tensor | None = None,
+        labels: torch.Tensor | None = None,
         dataset: Dataset | None = None,
         index: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         boxes = None if boxes is None else boxes.clone()
+        labels = None if labels is None else labels.clone()
 
         if not self.active:
-            return self._full_no_aug(image), boxes
+            return self._full_no_aug(image), boxes, labels
 
         if self.mosaic_prob > 0.0 and dataset is not None and index is not None and random.random() < self.mosaic_prob:
             image, annotations = self._apply_mosaic(dataset, index)
             boxes = torch.tensor([ann["box"] for ann in annotations], dtype=torch.float32)
+            labels = torch.tensor([int(ann["class_id"]) for ann in annotations], dtype=torch.long)
 
         image = self._apply_pil_ops(image)
 
@@ -172,7 +175,7 @@ class DetectionAugmenter:
         if self._eraser is not None:
             tensor = self._eraser(tensor)
         tensor = self._normalize(tensor)
-        return tensor, boxes
+        return tensor, boxes, labels
 
 
 def _list_image_files(images_dir: str) -> list[str]:
@@ -313,8 +316,17 @@ class StandardDetectionDataset(Dataset):
         target = _target_from_annotations(record["annotations"], image_id=record["image_id"])
 
         if self.is_train and self.augmenter is not None:
-            image_tensor, boxes = self.augmenter(image, target["boxes"], dataset=self, index=index)
-            target["boxes"] = boxes if boxes is not None else target["boxes"]
+            image_tensor, boxes, labels = self.augmenter(
+                image,
+                target["boxes"],
+                target["labels"],
+                dataset=self,
+                index=index,
+            )
+            if boxes is not None:
+                target["boxes"] = boxes
+            if labels is not None:
+                target["labels"] = labels
         else:
             image_tensor = self.transform(image)
 
