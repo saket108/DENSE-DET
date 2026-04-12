@@ -213,6 +213,9 @@ def resolve_args(args):
         "augment": coalesce(args.augment, augmentation_cfg.get("enabled"), True),
         "close_augment_after_epochs": coalesce(augmentation_cfg.get("close_after_epochs"), 35),
         "augment_fliplr": coalesce(augmentation_cfg.get("fliplr"), 0.5),
+        "augment_flipud": coalesce(augmentation_cfg.get("flipud"), 0.0),
+        "augment_rotate_deg": coalesce(augmentation_cfg.get("rotate_deg"), 0.0),
+        "augment_mosaic_prob": coalesce(augmentation_cfg.get("mosaic_prob"), 0.0),
         "augment_hsv_h": coalesce(augmentation_cfg.get("hsv_h"), 0.01),
         "augment_hsv_s": coalesce(augmentation_cfg.get("hsv_s"), 0.3),
         "augment_hsv_v": coalesce(augmentation_cfg.get("hsv_v"), 0.15),
@@ -379,7 +382,22 @@ def main():
     print(f"  Trainable params : {counts['trainable']:,}")
 
     print("\nBuilding data loaders...")
-    augmenter = DetectionAugmenter(enabled=args.augment, close_after_epochs=args.close_augment_after_epochs, fliplr=args.augment_fliplr, hsv_h=args.augment_hsv_h, hsv_s=args.augment_hsv_s, hsv_v=args.augment_hsv_v, blur_prob=args.augment_blur_prob, grayscale_prob=args.augment_grayscale_prob, equalize_prob=args.augment_equalize_prob, erasing_prob=args.augment_erasing_prob, image_size=args.imgsz)
+    augmenter = DetectionAugmenter(
+        enabled=args.augment,
+        close_after_epochs=args.close_augment_after_epochs,
+        fliplr=args.augment_fliplr,
+        flipud=args.augment_flipud,
+        rotate_deg=args.augment_rotate_deg,
+        mosaic_prob=args.augment_mosaic_prob,
+        hsv_h=args.augment_hsv_h,
+        hsv_s=args.augment_hsv_s,
+        hsv_v=args.augment_hsv_v,
+        blur_prob=args.augment_blur_prob,
+        grayscale_prob=args.augment_grayscale_prob,
+        equalize_prob=args.augment_equalize_prob,
+        erasing_prob=args.augment_erasing_prob,
+        image_size=args.imgsz,
+    )
     train_loader = build_train_loader(args.train_images, args.train_labels, batch_size=args.batch, image_size=args.imgsz, num_workers=args.workers, balanced=args.balanced_sampler, class_names=args.class_names, augmenter=augmenter)
     val_loader = build_val_loader(args.val_images, args.val_labels, batch_size=args.eval_batch, image_size=args.imgsz, num_workers=args.workers, class_names=args.class_names)
     print(f"  Train batches : {len(train_loader)}")

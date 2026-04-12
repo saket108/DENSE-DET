@@ -37,6 +37,9 @@ class DetectionAugmenter:
         enabled: bool = True,
         close_after_epochs: int = 35,
         fliplr: float = 0.5,
+        flipud: float = 0.0,
+        rotate_deg: float = 0.0,
+        mosaic_prob: float = 0.0,
         hsv_h: float = 0.01,
         hsv_s: float = 0.3,
         hsv_v: float = 0.15,
@@ -49,6 +52,9 @@ class DetectionAugmenter:
         self.enabled = bool(enabled)
         self.close_after_epochs = max(int(close_after_epochs), 0)
         self.fliplr = float(fliplr)
+        self.flipud = float(flipud)
+        self.rotate_deg = float(rotate_deg)
+        self.mosaic_prob = float(mosaic_prob)
         self.hsv_h = float(hsv_h)
         self.hsv_s = float(hsv_s)
         self.hsv_v = float(hsv_v)
@@ -93,6 +99,9 @@ class DetectionAugmenter:
         if self.hsv_v > 0.0:
             scale = 1.0 + random.uniform(-self.hsv_v, self.hsv_v)
             image = TF.adjust_brightness(image, max(scale, 0.0))
+        if self.rotate_deg > 0.0 and random.random() < 0.5:
+            angle = random.uniform(-self.rotate_deg, self.rotate_deg)
+            image = TF.rotate(image, angle, expand=False, fill=0)
         if random.random() < self.blur_prob:
             image = image.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.5)))
         if random.random() < self.grayscale_prob:
@@ -101,15 +110,51 @@ class DetectionAugmenter:
             image = ImageOps.equalize(image)
         return image
 
+    def _apply_mosaic(
+        self,
+        dataset: Dataset,
+        index: int,
+    ) -> tuple[Image.Image, list[dict[str, float | int | list[float]]]]:
+        s = self.image_size
+        indices = [index] + random.choices(range(len(dataset)), k=3)
+        canvas = Image.new("RGB", (s * 2, s * 2))
+        positions = [(0, 0), (s, 0), (0, s), (s, s)]
+
+        merged_annotations: list[dict[str, float | int | list[float]]] = []
+        for (idx, (px, py)) in zip(indices, positions):
+            record = dataset.records[idx]
+            img = Image.open(record["image_path"]).convert("RGB").resize((s, s))
+            canvas.paste(img, (px, py))
+
+            for ann in record["annotations"]:
+                cx, cy, w, h = ann["box"]
+                new_cx = (cx * s + px) / (s * 2)
+                new_cy = (cy * s + py) / (s * 2)
+                merged_annotations.append(
+                    {
+                        "class_id": ann["class_id"],
+                        "box": [new_cx, new_cy, w / 2.0, h / 2.0],
+                    }
+                )
+
+        canvas = canvas.resize((s, s))
+        return canvas, merged_annotations
+
     def __call__(
         self,
         image: Image.Image,
         boxes: torch.Tensor | None = None,
+        dataset: Dataset | None = None,
+        index: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         boxes = None if boxes is None else boxes.clone()
 
         if not self.active:
             return self._full_no_aug(image), boxes
+
+        if self.mosaic_prob > 0.0 and dataset is not None and index is not None and random.random() < self.mosaic_prob:
+            image, annotations = self._apply_mosaic(dataset, index)
+            boxes = torch.tensor([ann["box"] for ann in annotations], dtype=torch.float32)
 
         image = self._apply_pil_ops(image)
 
@@ -117,6 +162,11 @@ class DetectionAugmenter:
             image = TF.hflip(image)
             if boxes is not None and boxes.numel() > 0:
                 boxes[:, 0] = 1.0 - boxes[:, 0]
+
+        if self.flipud > 0.0 and random.random() < self.flipud:
+            image = TF.vflip(image)
+            if boxes is not None and boxes.numel() > 0:
+                boxes[:, 1] = 1.0 - boxes[:, 1]
 
         tensor = self._to_tensor(image)
         if self._eraser is not None:
@@ -263,7 +313,7 @@ class StandardDetectionDataset(Dataset):
         target = _target_from_annotations(record["annotations"], image_id=record["image_id"])
 
         if self.is_train and self.augmenter is not None:
-            image_tensor, boxes = self.augmenter(image, target["boxes"])
+            image_tensor, boxes = self.augmenter(image, target["boxes"], dataset=self, index=index)
             target["boxes"] = boxes if boxes is not None else target["boxes"]
         else:
             image_tensor = self.transform(image)
