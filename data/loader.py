@@ -448,6 +448,8 @@ def build_train_loader(
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=4 if num_workers > 0 else None,
         drop_last=len(dataset) > batch_size,
     )
 
@@ -477,4 +479,6 @@ def build_val_loader(
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=4 if num_workers > 0 else None,
     )

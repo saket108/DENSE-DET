@@ -1,7 +1,7 @@
 model:
   variant: small
   backbone_dims: [16, 32, 64, 128]
-  backbone_depths: [3, 3, 3, 1]
+  backbone_depths: [2, 3, 3, 2]
   head_depth: 2
   use_quality_head: true
 
