@@ -18,6 +18,7 @@ except ImportError:
 from data.loader import build_val_loader
 from model.dense_detector import DenseDet
 from utils.detection_metrics import evaluate_predictions, mean_metric, print_results, summarize_metrics
+from utils.reporting import save_batch_preview, save_detection_artifacts
 from utils.runtime import coalesce, load_yaml_config, normalize_class_names, parse_int_tuple, require_existing_paths, resolve_detection_paths
 
 
@@ -128,6 +129,7 @@ def parse_args():
     parser.add_argument("--no_quality_head", dest="use_quality_head", action="store_false")
     parser.add_argument("--weights", type=str, default="auto", choices=["auto", "ema", "model"])
     parser.add_argument("--save_results", type=str, default=None)
+    parser.add_argument("--artifact_dir", type=str, default=None)
     parser.add_argument("--strict", dest="strict_load", action="store_true")
     parser.add_argument("--no_strict", dest="strict_load", action="store_false")
     parser.set_defaults(use_quality_head=None)
@@ -182,6 +184,7 @@ def resolve_args(args):
         "use_quality_head": coalesce(args.use_quality_head, model_cfg.get("use_quality_head"), True),
         "weights": args.weights,
         "save_results": args.save_results,
+        "artifact_dir": args.artifact_dir,
         "strict_load": args.strict_load if args.strict_load is not None else True,
         "save_dir": coalesce(checkpoint_cfg.get("save_dir"), "runs/dense_det"),
         "benchmark": benchmark_cfg,
@@ -238,6 +241,38 @@ def run_dense_evaluation(model, loader, device, num_classes, conf_thresh=0.05, m
     return ap50, ap5095, pr_metrics, summary
 
 
+@torch.no_grad()
+def run_dense_evaluation_with_raw(model, loader, device, num_classes, conf_thresh=0.05, match_iou=0.5, nms_iou=0.6, max_batches=None, max_det=300, verbose=True, progress_label=None):
+    model.eval()
+    all_preds, all_targets = [], []
+    total_batches = min(len(loader), max_batches) if max_batches is not None else len(loader)
+    progress = tqdm(loader, total=total_batches, desc=progress_label or "Eval", dynamic_ncols=True, leave=False, disable=(tqdm is None or not verbose)) if tqdm else None
+    iterator = progress or loader
+    for batch_index, (images, targets, _) in enumerate(iterator):
+        if max_batches is not None and batch_index >= max_batches:
+            break
+        predictions = model.predict(images.to(device), conf_threshold=conf_thresh, nms_iou=nms_iou, max_det=max_det)
+        for pred, target in zip(predictions, targets):
+            all_preds.append({"boxes": pred["boxes"].cpu(), "labels": pred["labels"].cpu(), "confidences": pred["confidences"].cpu()})
+            all_targets.append({"boxes": target["boxes"].cpu(), "labels": target["labels"].cpu()})
+    if progress is not None:
+        progress.close()
+    if verbose:
+        print_prediction_diagnostics(all_preds, max_det)
+
+    ap50_metrics = evaluate_predictions(all_preds, all_targets, num_classes=num_classes, iou_threshold=0.5)
+    pr_metrics = ap50_metrics if match_iou == 0.5 else evaluate_predictions(all_preds, all_targets, num_classes=num_classes, iou_threshold=match_iou)
+    ap_all = {class_id: [float(ap50_metrics[class_id]["ap"])] for class_id in range(num_classes)}
+    for iou_threshold in np.arange(0.55, 1.0, 0.05):
+        metrics = evaluate_predictions(all_preds, all_targets, num_classes=num_classes, iou_threshold=float(iou_threshold))
+        for class_id, class_metrics in metrics.items():
+            ap_all[class_id].append(float(class_metrics["ap"]))
+    ap50 = {class_id: float(metrics["ap"]) for class_id, metrics in ap50_metrics.items()}
+    ap5095 = {class_id: float(np.mean(values)) for class_id, values in ap_all.items()}
+    summary = summarize_metrics(pr_metrics)
+    return ap50, ap5095, pr_metrics, summary, all_preds, all_targets
+
+
 def main():
     args = resolve_args(parse_args())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -283,10 +318,28 @@ def main():
     loader = build_val_loader(args.images_dir, args.labels_dir, batch_size=args.batch, image_size=args.imgsz, num_workers=args.workers, class_names=args.class_names)
     print(f"Eval batches: {len(loader)}")
 
-    ap50, ap5095, pr_metrics, summary = run_dense_evaluation(model, loader, device, num_classes=args.num_classes, conf_thresh=args.conf, match_iou=args.iou_thresh, nms_iou=args.nms_iou, max_batches=args.max_batches, max_det=args.max_det)
+    artifact_dir = args.artifact_dir
+    if artifact_dir is None:
+        artifact_dir = os.path.dirname(args.checkpoint) if args.checkpoint else args.save_dir
+
+    preview_batch = next(iter(loader))
+    save_batch_preview(preview_batch[0], preview_batch[1], args.class_names, os.path.join(artifact_dir, "val_batch_labels.jpg"))
+
+    ap50, ap5095, pr_metrics, summary, all_preds, all_targets = run_dense_evaluation_with_raw(
+        model,
+        loader,
+        device,
+        num_classes=args.num_classes,
+        conf_thresh=args.conf,
+        match_iou=args.iou_thresh,
+        nms_iou=args.nms_iou,
+        max_batches=args.max_batches,
+        max_det=args.max_det,
+    )
     print_results(ap50, ap5095, pr_metrics, summary, match_iou=args.iou_thresh, class_names=args.class_names)
     print(f"Macro mAP50={mean_metric(list(ap50.values())):.4f} mAP50-95={mean_metric(list(ap5095.values())):.4f}")
     print_benchmark_comparison(ap50, ap5095, pr_metrics, summary, args.benchmark, args.class_names)
+    save_detection_artifacts(all_preds, all_targets, args.class_names, artifact_dir, iou_threshold=args.iou_thresh)
 
     if args.save_results:
         with open(args.save_results, "w", encoding="utf-8") as handle:

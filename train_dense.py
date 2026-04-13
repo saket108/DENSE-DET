@@ -22,10 +22,11 @@ except ImportError:
     tqdm = None
 
 from data.loader import DetectionAugmenter, build_train_loader, build_val_loader
-from evaluate_dense import print_benchmark_comparison, run_dense_evaluation
+from evaluate_dense import print_benchmark_comparison, run_dense_evaluation_with_raw
 from model.dense_detector import DenseDet
 from training.dense_loss import DenseDetectionLoss
 from utils.detection_metrics import mean_metric
+from utils.reporting import save_batch_preview, save_detection_artifacts, save_history_plot
 from utils.runtime import coalesce, load_yaml_config, normalize_class_names, parse_int_tuple, require_existing_paths, resolve_detection_paths
 
 
@@ -207,7 +208,7 @@ def resolve_args(args):
         "eval_iou": coalesce(args.eval_iou, eval_cfg.get("iou_thresh"), 0.5),
         "eval_nms_iou": coalesce(args.eval_nms_iou, eval_cfg.get("nms_iou"), 0.6),
         "eval_max_det": coalesce(eval_cfg.get("max_det"), 300),
-        "eval_use_ema": coalesce(eval_cfg.get("use_ema"), False),
+        "eval_use_ema": coalesce(eval_cfg.get("use_ema"), args.use_ema, train_cfg.get("use_ema"), True),
         "checkpoint_metric": coalesce(args.checkpoint_metric, eval_cfg.get("checkpoint_metric"), "map50_95"),
         "balanced_sampler": coalesce(args.balanced_sampler, train_cfg.get("balanced_sampler"), True),
         "augment": coalesce(args.augment, augmentation_cfg.get("enabled"), True),
@@ -274,6 +275,14 @@ def append_csv_row(path: str, fieldnames: list[str], row: dict) -> None:
         writer.writerow(row)
 
 
+def save_preview_from_loader(loader, class_names, path: str) -> None:
+    try:
+        images, targets, _ = next(iter(loader))
+    except StopIteration:
+        return
+    save_batch_preview(images, targets, class_names, path)
+
+
 def save_checkpoint(model, optimizer, scheduler, epoch, val_loss, save_dir, tag, model_config, best_val, best_epoch, epochs_without_improvement, best_checkpoint_score, train_loss=None, ema=None, ema_decay=None):
     os.makedirs(save_dir, exist_ok=True)
     path = os.path.join(save_dir, f"dense_det_{tag}.pt")
@@ -308,14 +317,16 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
             if device.type == "cuda":
                 scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            step_successful = None
+            step_successful = False
             if device.type == "cuda":
-                step_successful = scaler.step(optimizer)
+                scale_before = scaler.get_scale()
+                scaler.step(optimizer)
                 scaler.update()
+                step_successful = scaler.get_scale() >= scale_before
             else:
                 optimizer.step()
                 step_successful = True
-            if step_successful is not None and ema is not None:
+            if step_successful and ema is not None:
                 ema.update(model)
             optimizer.zero_grad(set_to_none=True)
         total_loss += losses.total.item()
@@ -428,8 +439,12 @@ def main():
     print(f"\nStarting training for {args.epochs} epochs...")
     os.makedirs(args.save_dir, exist_ok=True)
     history_path = os.path.join(args.save_dir, "train_history.csv")
+    results_csv_path = os.path.join(args.save_dir, "results.csv")
     fields = ["epoch", "train_loss", "val_loss", "lr", "elapsed_sec", "best_val", "best_epoch", "epochs_without_improvement", "map50", "map5095", "macro_precision", "macro_recall", "micro_precision", "micro_recall"]
     print(f"{'Epoch':<10} {'Train':>10} {'Val':>10} {'Prec':>8} {'Recall':>8} {'mAP50':>10} {'mAP50-95':>10} {'Sec':>8}")
+
+    save_preview_from_loader(train_loader, args.class_names, os.path.join(args.save_dir, "train_batch.jpg"))
+    save_preview_from_loader(val_loader, args.class_names, os.path.join(args.save_dir, "val_batch_labels.jpg"))
 
     for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
@@ -444,11 +459,26 @@ def main():
         val_loss = validate(eval_model, val_loader, loss_fn, device, epoch, use_mixed_precision=args.use_mixed_precision)
         map50 = map5095 = ""
         summary = None
+        all_preds = all_targets = None
         if args.eval_every_epochs and epoch % args.eval_every_epochs == 0:
-            ap50, ap5095, pr_metrics, summary = run_dense_evaluation(eval_model, val_loader, device, num_classes=args.num_classes, conf_thresh=args.eval_conf, match_iou=args.eval_iou, nms_iou=args.eval_nms_iou, max_batches=args.eval_max_batches, max_det=args.eval_max_det, verbose=False, progress_label=f"Eval {epoch}/{args.epochs}")
+            ap50, ap5095, pr_metrics, summary, all_preds, all_targets = run_dense_evaluation_with_raw(
+                eval_model,
+                val_loader,
+                device,
+                num_classes=args.num_classes,
+                conf_thresh=args.eval_conf,
+                match_iou=args.eval_iou,
+                nms_iou=args.eval_nms_iou,
+                max_batches=args.eval_max_batches,
+                max_det=args.eval_max_det,
+                verbose=False,
+                progress_label=f"Eval {epoch}/{args.epochs}",
+            )
             map50 = mean_metric(list(ap50.values()))
             map5095 = mean_metric(list(ap5095.values()))
             print_benchmark_comparison(ap50, ap5095, pr_metrics, summary, args.benchmark, args.class_names)
+            if all_preds is not None and all_targets is not None:
+                save_detection_artifacts(all_preds, all_targets, args.class_names, args.save_dir, iou_threshold=args.eval_iou)
         scheduler.step()
         elapsed = time.time() - t0
         if val_loss < best_val:
@@ -467,7 +497,10 @@ def main():
         macro_precision = None if summary is None else summary["macro_precision"]
         macro_recall = None if summary is None else summary["macro_recall"]
         print(f"{f'{epoch}/{args.epochs}':<10} {train_loss:>10.4f} {val_loss:>10.4f} {format_metric(macro_precision, 3):>8} {format_metric(macro_recall, 3):>8} {format_metric(map50, 3):>10} {format_metric(map5095, 3):>10} {elapsed:>8.0f}")
-        append_csv_row(history_path, fields, {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": scheduler.get_last_lr()[0], "elapsed_sec": elapsed, "best_val": best_val, "best_epoch": best_epoch, "epochs_without_improvement": epochs_without_improvement, "map50": map50, "map5095": map5095, "macro_precision": "" if summary is None else summary["macro_precision"], "macro_recall": "" if summary is None else summary["macro_recall"], "micro_precision": "" if summary is None else summary["micro_precision"], "micro_recall": "" if summary is None else summary["micro_recall"]})
+        row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": scheduler.get_last_lr()[0], "elapsed_sec": elapsed, "best_val": best_val, "best_epoch": best_epoch, "epochs_without_improvement": epochs_without_improvement, "map50": map50, "map5095": map5095, "macro_precision": "" if summary is None else summary["macro_precision"], "macro_recall": "" if summary is None else summary["macro_recall"], "micro_precision": "" if summary is None else summary["micro_precision"], "micro_recall": "" if summary is None else summary["micro_recall"]}
+        append_csv_row(history_path, fields, row)
+        append_csv_row(results_csv_path, fields, row)
+        save_history_plot(results_csv_path, os.path.join(args.save_dir, "results.png"))
         save_checkpoint(model, optimizer, scheduler, epoch, val_loss, args.save_dir, "last", model_config, best_val, best_epoch, epochs_without_improvement, best_checkpoint_score, train_loss=train_loss, ema=ema, ema_decay=args.ema_decay)
         if improved:
             save_checkpoint(model, optimizer, scheduler, epoch, val_loss, args.save_dir, "best", model_config, best_val, best_epoch, epochs_without_improvement, best_checkpoint_score, train_loss=train_loss, ema=ema, ema_decay=args.ema_decay)
@@ -479,7 +512,7 @@ def main():
 
     print(f"\nTraining complete. Best val loss: {best_val:.4f}")
     print(f"Checkpoints: {args.save_dir}")
-    print(f"History:     {history_path}")
+    print(f"History:     {results_csv_path}")
 
 
 if __name__ == "__main__":

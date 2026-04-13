@@ -24,7 +24,7 @@ train:
   accumulation_steps: 2
   num_workers: 2
   image_size: 640
-  balanced_sampler: true
+  balanced_sampler: false
   use_ema: true
   ema_decay: 0.9998
   mixed_precision: true
@@ -43,22 +43,22 @@ loss:
 
 augmentation:
   enabled: true
-  close_after_epochs: 40
-  fliplr: 0.5
-  flipud: 0.3
-  rotate_deg: 15
-  mosaic_prob: 0.5
-  hsv_h: 0.01
-  hsv_s: 0.2
-  hsv_v: 0.1
-  blur_prob: 0.01
+  close_after_epochs: 20
+  fliplr: 0.3
+  flipud: 0.0
+  rotate_deg: 5
+  mosaic_prob: 0.0
+  hsv_h: 0.005
+  hsv_s: 0.1
+  hsv_v: 0.05
+  blur_prob: 0.0
   grayscale_prob: 0.0
-  equalize_prob: 0.01
-  erasing_prob: 0.02
+  equalize_prob: 0.0
+  erasing_prob: 0.0
 
 eval:
   batch_size: 8
-  conf_thresh: 0.25
+  conf_thresh: 0.05
   iou_thresh: 0.5
   nms_iou: 0.6
   max_det: 300

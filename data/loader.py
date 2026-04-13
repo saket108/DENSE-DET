@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import random
 from collections import Counter
@@ -90,7 +91,63 @@ class DetectionAugmenter:
             return True
         return self.current_epoch <= self.close_after_epochs
 
-    def _apply_pil_ops(self, image: Image.Image) -> Image.Image:
+    def _rotate_boxes(
+        self,
+        boxes: torch.Tensor | None,
+        angle_deg: float,
+        image_w: int,
+        image_h: int,
+    ) -> torch.Tensor | None:
+        if boxes is None or boxes.numel() == 0 or angle_deg == 0.0:
+            return boxes
+
+        boxes_abs = boxes.clone()
+        cx = boxes_abs[:, 0] * float(image_w)
+        cy = boxes_abs[:, 1] * float(image_h)
+        half_w = boxes_abs[:, 2] * float(image_w) * 0.5
+        half_h = boxes_abs[:, 3] * float(image_h) * 0.5
+
+        x1 = cx - half_w
+        y1 = cy - half_h
+        x2 = cx + half_w
+        y2 = cy + half_h
+
+        corners = torch.stack(
+            [
+                torch.stack([x1, y1], dim=1),
+                torch.stack([x2, y1], dim=1),
+                torch.stack([x2, y2], dim=1),
+                torch.stack([x1, y2], dim=1),
+            ],
+            dim=1,
+        )
+
+        angle_rad = math.radians(angle_deg)
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        center = boxes_abs.new_tensor([float(image_w) * 0.5, float(image_h) * 0.5])
+        rot = boxes_abs.new_tensor([[cos_a, -sin_a], [sin_a, cos_a]])
+
+        rotated = (corners - center) @ rot.T + center
+        rot_x = rotated[..., 0].clamp_(0.0, float(image_w))
+        rot_y = rotated[..., 1].clamp_(0.0, float(image_h))
+
+        new_x1 = rot_x.min(dim=1).values
+        new_y1 = rot_y.min(dim=1).values
+        new_x2 = rot_x.max(dim=1).values
+        new_y2 = rot_y.max(dim=1).values
+
+        boxes_abs[:, 0] = ((new_x1 + new_x2) * 0.5 / float(image_w)).clamp_(0.0, 1.0)
+        boxes_abs[:, 1] = ((new_y1 + new_y2) * 0.5 / float(image_h)).clamp_(0.0, 1.0)
+        boxes_abs[:, 2] = ((new_x2 - new_x1) / float(image_w)).clamp_(0.0, 1.0)
+        boxes_abs[:, 3] = ((new_y2 - new_y1) / float(image_h)).clamp_(0.0, 1.0)
+        return boxes_abs
+
+    def _apply_pil_ops(
+        self,
+        image: Image.Image,
+        boxes: torch.Tensor | None = None,
+    ) -> tuple[Image.Image, torch.Tensor | None]:
         if self.hsv_h > 0.0:
             image = TF.adjust_hue(image, random.uniform(-self.hsv_h, self.hsv_h))
         if self.hsv_s > 0.0:
@@ -101,6 +158,7 @@ class DetectionAugmenter:
             image = TF.adjust_brightness(image, max(scale, 0.0))
         if self.rotate_deg > 0.0 and random.random() < 0.5:
             angle = random.uniform(-self.rotate_deg, self.rotate_deg)
+            boxes = self._rotate_boxes(boxes, angle, image.width, image.height)
             image = TF.rotate(image, angle, expand=False, fill=0)
         if random.random() < self.blur_prob:
             image = image.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.5, 1.5)))
@@ -108,7 +166,7 @@ class DetectionAugmenter:
             image = ImageOps.grayscale(image).convert("RGB")
         if random.random() < self.equalize_prob:
             image = ImageOps.equalize(image)
-        return image
+        return image, boxes
 
     def _apply_mosaic(
         self,
@@ -159,7 +217,7 @@ class DetectionAugmenter:
             boxes = torch.tensor([ann["box"] for ann in annotations], dtype=torch.float32)
             labels = torch.tensor([int(ann["class_id"]) for ann in annotations], dtype=torch.long)
 
-        image = self._apply_pil_ops(image)
+        image, boxes = self._apply_pil_ops(image, boxes)
 
         if random.random() < self.fliplr:
             image = TF.hflip(image)
