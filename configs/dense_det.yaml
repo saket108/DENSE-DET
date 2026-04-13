@@ -1,7 +1,7 @@
 model:
   variant: small
   backbone_dims: [16, 32, 64, 128]
-  backbone_depths: [2, 3, 3, 2]
+  backbone_depths: [2, 2, 4, 2]
   head_depth: 2
   use_quality_head: true
 
@@ -24,9 +24,9 @@ train:
   accumulation_steps: 2
   num_workers: 2
   image_size: 640
-  balanced_sampler: false
+  balanced_sampler: true
   use_ema: true
-  ema_decay: 0.9998
+  ema_decay: 0.999
   mixed_precision: true
 
 optimizer:
@@ -43,14 +43,14 @@ loss:
 
 augmentation:
   enabled: true
-  close_after_epochs: 20
-  fliplr: 0.3
+  close_after_epochs: 35
+  fliplr: 0.5
   flipud: 0.0
-  rotate_deg: 5
-  mosaic_prob: 0.0
+  rotate_deg: 10
+  mosaic_prob: 0.3
   hsv_h: 0.005
-  hsv_s: 0.1
-  hsv_v: 0.05
+  hsv_s: 0.3
+  hsv_v: 0.15
   blur_prob: 0.0
   grayscale_prob: 0.0
   equalize_prob: 0.0
@@ -59,6 +59,7 @@ augmentation:
 eval:
   batch_size: 8
   conf_thresh: 0.05
+  monitor_conf_thresh: 0.25
   iou_thresh: 0.5
   nms_iou: 0.6
   max_det: 300

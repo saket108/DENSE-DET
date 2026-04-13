@@ -333,7 +333,8 @@ class DenseDetectionLoss(nn.Module):
         iou_mean = iou_sum / iou_count
         iou_sq_sum = (candidate_ious ** 2).sum(dim=0)
         iou_var = (iou_sq_sum / iou_count - iou_mean ** 2).clamp(min=0)
-        iou_thresh = (iou_mean + iou_var.sqrt()).unsqueeze(0)
+        
+        iou_thresh = (iou_mean + iou_var.sqrt()).clamp(min=0.1).unsqueeze(0)
 
         positive_mask = candidate_mask & (anchor_ious >= iou_thresh) & inside_box
 

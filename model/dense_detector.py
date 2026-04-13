@@ -248,7 +248,12 @@ def decode_predictions(
             if quality_map is not None:
                 quality = quality_map[batch_index].permute(1, 2, 0).reshape(-1).sigmoid()
                 raw_scores, labels = cls_scores.max(dim=1)
-                scores = (raw_scores * quality).clamp(min=0.0, max=1.0)
+                # FIX-1: sqrt fusion instead of direct product.
+                # Direct product (raw * quality) aggressively suppresses scores
+                # early in training when the quality head hasn't warmed up yet
+                # (quality ≈ 0.5 halves every score).  sqrt keeps scores in a
+                # healthier range while still penalising low-quality predictions.
+                scores = (raw_scores * quality).sqrt().clamp(min=0.0, max=1.0)
             else:
                 scores, labels = cls_scores.max(dim=1)
 

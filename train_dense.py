@@ -144,6 +144,7 @@ def parse_args():
     parser.add_argument("--eval_every_epochs", type=int, default=None)
     parser.add_argument("--eval_max_batches", type=int, default=None)
     parser.add_argument("--eval_conf", type=float, default=None)
+    parser.add_argument("--monitor_conf", type=float, default=None)
     parser.add_argument("--eval_iou", type=float, default=None)
     parser.add_argument("--eval_nms_iou", type=float, default=None)
     parser.add_argument("--checkpoint_metric", type=str, default=None, choices=["map50_95", "map50", "val_loss"])
@@ -205,6 +206,7 @@ def resolve_args(args):
         "eval_every_epochs": coalesce(args.eval_every_epochs, eval_cfg.get("during_train_every_epochs"), 5),
         "eval_max_batches": coalesce(args.eval_max_batches, eval_cfg.get("during_train_max_batches")),
         "eval_conf": coalesce(args.eval_conf, eval_cfg.get("conf_thresh"), 0.05),
+        "eval_monitor_conf": coalesce(args.monitor_conf, eval_cfg.get("monitor_conf_thresh")),
         "eval_iou": coalesce(args.eval_iou, eval_cfg.get("iou_thresh"), 0.5),
         "eval_nms_iou": coalesce(args.eval_nms_iou, eval_cfg.get("nms_iou"), 0.6),
         "eval_max_det": coalesce(eval_cfg.get("max_det"), 300),
@@ -383,6 +385,8 @@ def main():
     print(f"AMP          : {args.use_mixed_precision}")
     print(f"Assigner     : {args.assigner}")
     print(f"Ckpt metric  : {args.checkpoint_metric}")
+    if args.eval_monitor_conf is not None:
+        print(f"Monitor eval : conf={args.eval_monitor_conf}")
 
     print("\nBuilding DenseDet...")
     model_config = build_model_config(args)
@@ -477,6 +481,31 @@ def main():
             map50 = mean_metric(list(ap50.values()))
             map5095 = mean_metric(list(ap5095.values()))
             print_benchmark_comparison(ap50, ap5095, pr_metrics, summary, args.benchmark, args.class_names)
+            if (
+                args.eval_monitor_conf is not None
+                and float(args.eval_monitor_conf) > float(args.eval_conf)
+            ):
+                mon_ap50, mon_ap5095, _, mon_summary, _, _ = run_dense_evaluation_with_raw(
+                    eval_model,
+                    val_loader,
+                    device,
+                    num_classes=args.num_classes,
+                    conf_thresh=float(args.eval_monitor_conf),
+                    match_iou=args.eval_iou,
+                    nms_iou=args.eval_nms_iou,
+                    max_batches=args.eval_max_batches,
+                    max_det=args.eval_max_det,
+                    verbose=False,
+                    progress_label=f"Monitor {epoch}/{args.epochs}",
+                )
+                print(
+                    "  Monitor @ "
+                    f"conf={float(args.eval_monitor_conf):.2f} | "
+                    f"Prec={mon_summary['macro_precision']:.3f} "
+                    f"Recall={mon_summary['macro_recall']:.3f} "
+                    f"mAP50={mean_metric(list(mon_ap50.values())):.3f} "
+                    f"mAP50-95={mean_metric(list(mon_ap5095.values())):.3f}"
+                )
             if all_preds is not None and all_targets is not None:
                 save_detection_artifacts(all_preds, all_targets, args.class_names, args.save_dir, iou_threshold=args.eval_iou)
         scheduler.step()
