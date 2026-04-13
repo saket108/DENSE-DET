@@ -168,9 +168,7 @@ class DenseDetectionLoss(nn.Module):
                 pred_boxes_pos = distance_to_boxes(points[pos_mask], pred_box[batch_index][pos_mask])
                 target_boxes = assigned["boxes"][pos_mask]
                 iou_values = box_iou_pairwise(pred_boxes_pos, target_boxes).detach().clamp_(0.0, 1.0)
-                cls_targets[pos_mask, assigned["labels"][pos_mask]] = (
-                    torch.ones_like(iou_values) if pred_qual is not None else iou_values
-                )
+                cls_targets[pos_mask, assigned["labels"][pos_mask]] = iou_values
 
                 giou_values = generalized_box_iou_pairwise(pred_boxes_pos, target_boxes)
                 box_loss = box_loss + (1.0 - giou_values).sum()
