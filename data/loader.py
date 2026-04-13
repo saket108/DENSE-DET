@@ -143,6 +143,37 @@ class DetectionAugmenter:
         boxes_abs[:, 3] = ((new_y2 - new_y1) / float(image_h)).clamp_(0.0, 1.0)
         return boxes_abs
 
+    def _sanitize_boxes_labels(
+        self,
+        boxes: torch.Tensor | None,
+        labels: torch.Tensor | None,
+        min_size: float = 1e-3,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if boxes is None or boxes.numel() == 0:
+            return boxes, labels
+
+        boxes = boxes.clone()
+        boxes[:, 2:] = boxes[:, 2:].clamp_(0.0, 1.0)
+
+        valid = (boxes[:, 2] > min_size) & (boxes[:, 3] > min_size)
+        if labels is not None and labels.numel() != boxes.shape[0]:
+            raise ValueError("Box/label count mismatch after augmentation.")
+
+        boxes = boxes[valid]
+        if labels is not None:
+            labels = labels[valid]
+
+        if boxes.numel() == 0:
+            empty_boxes = torch.zeros((0, 4), dtype=torch.float32)
+            empty_labels = None if labels is None else torch.zeros((0,), dtype=labels.dtype)
+            return empty_boxes, empty_labels
+
+        half_w = boxes[:, 2] * 0.5
+        half_h = boxes[:, 3] * 0.5
+        boxes[:, 0] = torch.maximum(torch.minimum(boxes[:, 0], 1.0 - half_w), half_w)
+        boxes[:, 1] = torch.maximum(torch.minimum(boxes[:, 1], 1.0 - half_h), half_h)
+        return boxes, labels
+
     def _apply_pil_ops(
         self,
         image: Image.Image,
@@ -228,6 +259,8 @@ class DetectionAugmenter:
             image = TF.vflip(image)
             if boxes is not None and boxes.numel() > 0:
                 boxes[:, 1] = 1.0 - boxes[:, 1]
+
+        boxes, labels = self._sanitize_boxes_labels(boxes, labels)
 
         tensor = self._to_tensor(image)
         if self._eraser is not None:
