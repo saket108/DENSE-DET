@@ -121,6 +121,8 @@ def parse_args():
     parser.add_argument("--iou_thresh", type=float, default=None)
     parser.add_argument("--nms_iou", type=float, default=None)
     parser.add_argument("--max_det", type=int, default=None)
+    parser.add_argument("--current_epoch", type=int, default=None)
+    parser.add_argument("--warmup_quality_epochs", type=int, default=10)
     parser.add_argument("--variant", type=str, default=None)
     parser.add_argument("--backbone_dims", type=str, default=None)
     parser.add_argument("--backbone_depths", type=str, default=None)
@@ -175,6 +177,8 @@ def resolve_args(args):
         "iou_thresh": coalesce(args.iou_thresh, eval_cfg.get("iou_thresh"), 0.5),
         "nms_iou": coalesce(args.nms_iou, eval_cfg.get("nms_iou"), 0.6),
         "max_det": coalesce(args.max_det, eval_cfg.get("max_det"), 300),
+        "current_epoch": args.current_epoch,
+        "warmup_quality_epochs": args.warmup_quality_epochs,
         "num_classes": num_classes,
         "class_names": class_names,
         "variant": coalesce(args.variant, model_cfg.get("variant"), "small"),
@@ -210,7 +214,7 @@ def apply_checkpoint_model_config(args, checkpoint):
 
 
 @torch.no_grad()
-def run_dense_evaluation(model, loader, device, num_classes, conf_thresh=0.05, match_iou=0.5, nms_iou=0.6, max_batches=None, max_det=300, verbose=True, progress_label=None):
+def run_dense_evaluation(model, loader, device, num_classes, conf_thresh=0.05, match_iou=0.5, nms_iou=0.6, max_batches=None, max_det=300, verbose=True, progress_label=None, current_epoch=None, warmup_quality_epochs=10):
     model.eval()
     all_preds, all_targets = [], []
     total_batches = min(len(loader), max_batches) if max_batches is not None else len(loader)
@@ -219,7 +223,14 @@ def run_dense_evaluation(model, loader, device, num_classes, conf_thresh=0.05, m
     for batch_index, (images, targets, _) in enumerate(iterator):
         if max_batches is not None and batch_index >= max_batches:
             break
-        predictions = model.predict(images.to(device), conf_threshold=conf_thresh, nms_iou=nms_iou, max_det=max_det)
+        predictions = model.predict(
+            images.to(device),
+            conf_threshold=conf_thresh,
+            nms_iou=nms_iou,
+            max_det=max_det,
+            current_epoch=current_epoch,
+            warmup_quality_epochs=warmup_quality_epochs,
+        )
         for pred, target in zip(predictions, targets):
             all_preds.append({"boxes": pred["boxes"].cpu(), "labels": pred["labels"].cpu(), "confidences": pred["confidences"].cpu()})
             all_targets.append({"boxes": target["boxes"].cpu(), "labels": target["labels"].cpu()})
@@ -242,7 +253,7 @@ def run_dense_evaluation(model, loader, device, num_classes, conf_thresh=0.05, m
 
 
 @torch.no_grad()
-def run_dense_evaluation_with_raw(model, loader, device, num_classes, conf_thresh=0.05, match_iou=0.5, nms_iou=0.6, max_batches=None, max_det=300, verbose=True, progress_label=None):
+def run_dense_evaluation_with_raw(model, loader, device, num_classes, conf_thresh=0.05, match_iou=0.5, nms_iou=0.6, max_batches=None, max_det=300, verbose=True, progress_label=None, current_epoch=None, warmup_quality_epochs=10):
     model.eval()
     all_preds, all_targets = [], []
     total_batches = min(len(loader), max_batches) if max_batches is not None else len(loader)
@@ -251,7 +262,14 @@ def run_dense_evaluation_with_raw(model, loader, device, num_classes, conf_thres
     for batch_index, (images, targets, _) in enumerate(iterator):
         if max_batches is not None and batch_index >= max_batches:
             break
-        predictions = model.predict(images.to(device), conf_threshold=conf_thresh, nms_iou=nms_iou, max_det=max_det)
+        predictions = model.predict(
+            images.to(device),
+            conf_threshold=conf_thresh,
+            nms_iou=nms_iou,
+            max_det=max_det,
+            current_epoch=current_epoch,
+            warmup_quality_epochs=warmup_quality_epochs,
+        )
         for pred, target in zip(predictions, targets):
             all_preds.append({"boxes": pred["boxes"].cpu(), "labels": pred["labels"].cpu(), "confidences": pred["confidences"].cpu()})
             all_targets.append({"boxes": target["boxes"].cpu(), "labels": target["labels"].cpu()})
@@ -335,6 +353,8 @@ def main():
         nms_iou=args.nms_iou,
         max_batches=args.max_batches,
         max_det=args.max_det,
+        current_epoch=args.current_epoch,
+        warmup_quality_epochs=args.warmup_quality_epochs,
     )
     print_results(ap50, ap5095, pr_metrics, summary, match_iou=args.iou_thresh, class_names=args.class_names)
     print(f"Macro mAP50={mean_metric(list(ap50.values())):.4f} mAP50-95={mean_metric(list(ap5095.values())):.4f}")

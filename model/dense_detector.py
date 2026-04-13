@@ -192,6 +192,8 @@ class DenseDet(nn.Module):
         conf_threshold: float = 0.05,
         nms_iou: float = 0.6,
         max_det: int = 300,
+        current_epoch: int | None = None,
+        warmup_quality_epochs: int = 10,
     ) -> list[dict[str, torch.Tensor]]:
         was_training = self.training
         self.eval()
@@ -201,6 +203,8 @@ class DenseDet(nn.Module):
             conf_threshold=conf_threshold,
             nms_iou=nms_iou,
             max_det=max_det,
+            current_epoch=current_epoch,
+            warmup_quality_epochs=warmup_quality_epochs,
         )
         if was_training:
             self.train()
@@ -217,6 +221,8 @@ def decode_predictions(
     conf_threshold: float,
     nms_iou: float,
     max_det: int,
+    current_epoch: int | None = None,
+    warmup_quality_epochs: int = 10,
 ) -> list[dict[str, torch.Tensor]]:
     cls_levels = outputs["cls"]  # type: ignore[index]
     box_levels = outputs["box"]  # type: ignore[index]
@@ -245,14 +251,17 @@ def decode_predictions(
             cls_scores = cls_map[batch_index].permute(1, 2, 0).reshape(-1, num_classes).sigmoid()
             box_distances = box_map[batch_index].permute(1, 2, 0).reshape(-1, 4) * int(stride)
 
-            if quality_map is not None:
+            use_quality = (
+                quality_map is not None
+                and (
+                    current_epoch is None
+                    or int(current_epoch) >= int(warmup_quality_epochs)
+                )
+            )
+
+            if use_quality:
                 quality = quality_map[batch_index].permute(1, 2, 0).reshape(-1).sigmoid()
                 raw_scores, labels = cls_scores.max(dim=1)
-                # FIX-1: sqrt fusion instead of direct product.
-                # Direct product (raw * quality) aggressively suppresses scores
-                # early in training when the quality head hasn't warmed up yet
-                # (quality ≈ 0.5 halves every score).  sqrt keeps scores in a
-                # healthier range while still penalising low-quality predictions.
                 scores = (raw_scores * quality).sqrt().clamp(min=0.0, max=1.0)
             else:
                 scores, labels = cls_scores.max(dim=1)

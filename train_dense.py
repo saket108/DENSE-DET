@@ -477,6 +477,8 @@ def main():
                 max_det=args.eval_max_det,
                 verbose=False,
                 progress_label=f"Eval {epoch}/{args.epochs}",
+                current_epoch=epoch,
+                warmup_quality_epochs=10,
             )
             map50 = mean_metric(list(ap50.values()))
             map5095 = mean_metric(list(ap5095.values()))
@@ -497,6 +499,8 @@ def main():
                     max_det=args.eval_max_det,
                     verbose=False,
                     progress_label=f"Monitor {epoch}/{args.epochs}",
+                    current_epoch=epoch,
+                    warmup_quality_epochs=10,
                 )
                 print(
                     "  Monitor @ "
