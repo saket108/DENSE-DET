@@ -30,7 +30,7 @@ train:
   mixed_precision: true
 
 optimizer:
-  lr: 0.0004
+  lr: 0.0006
   weight_decay: 0.01
 
 scheduler:
@@ -43,14 +43,14 @@ loss:
 
 augmentation:
   enabled: true
-  close_after_epochs: 35
-  fliplr: 0.5
+  close_after_epochs: 20
+  fliplr: 0.3
   flipud: 0.0
-  rotate_deg: 10
-  mosaic_prob: 0.3
+  rotate_deg: 5
+  mosaic_prob: 0.0
   hsv_h: 0.005
-  hsv_s: 0.3
-  hsv_v: 0.15
+  hsv_s: 0.1
+  hsv_v: 0.05
   blur_prob: 0.0
   grayscale_prob: 0.0
   equalize_prob: 0.0
@@ -63,7 +63,7 @@ eval:
   iou_thresh: 0.5
   nms_iou: 0.6
   max_det: 300
-  use_ema: false
+  use_ema: true
   during_train_every_epochs: 2
   during_train_max_batches: 50
   checkpoint_metric: map50_95
