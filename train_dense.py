@@ -6,6 +6,7 @@ import argparse
 import csv
 import math
 import os
+import random
 import sys
 import time
 from collections.abc import Mapping
@@ -14,6 +15,7 @@ from copy import deepcopy
 import torch
 from torch import amp
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 
 try:
@@ -156,13 +158,15 @@ def parse_args():
     parser.add_argument("--no_ema", dest="use_ema", action="store_false")
     parser.add_argument("--mixed_precision", dest="use_mixed_precision", action="store_true")
     parser.add_argument("--no_mixed_precision", dest="use_mixed_precision", action="store_false")
+    parser.add_argument("--compile", dest="use_compile", action="store_true")
+    parser.add_argument("--no_compile", dest="use_compile", action="store_false")
     parser.add_argument("--variant", type=str, default=None)
     parser.add_argument("--backbone_dims", type=str, default=None)
     parser.add_argument("--backbone_depths", type=str, default=None)
     parser.add_argument("--head_depth", type=int, default=None)
     parser.add_argument("--quality_head", dest="use_quality_head", action="store_true")
     parser.add_argument("--no_quality_head", dest="use_quality_head", action="store_false")
-    parser.set_defaults(balanced_sampler=None, augment=None, use_ema=None, use_mixed_precision=None, use_quality_head=None)
+    parser.set_defaults(balanced_sampler=None, augment=None, use_ema=None, use_mixed_precision=None, use_compile=None, use_quality_head=None)
     return parser.parse_args()
 
 
@@ -240,7 +244,10 @@ def resolve_args(args):
         "use_quality_head": coalesce(args.use_quality_head, model_cfg.get("use_quality_head"), True),
         "assigner": coalesce(loss_cfg.get("assigner"), "atss"),
         "quality_loss_weight": coalesce(loss_cfg.get("quality"), 1.0),
+        "atss_topk": coalesce(loss_cfg.get("atss_topk"), 9),
+        "atss_anchor_scale": coalesce(loss_cfg.get("atss_anchor_scale"), 4.0),
         "benchmark": benchmark_cfg,
+        "use_compile": coalesce(args.use_compile, train_cfg.get("compile"), False),
     }
     require_existing_paths(train_images=resolved["train_images"], val_images=resolved["val_images"], train_labels=resolved["train_labels"], val_labels=resolved["val_labels"])
     return argparse.Namespace(**resolved)
@@ -321,6 +328,10 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
     optimizer.zero_grad(set_to_none=True)
     for batch_index, (images, targets, _) in enumerate(iterator):
         images = images.to(device, non_blocking=True)
+        if batch_index % 10 == 0:
+            new_size = random.choice([480, 512, 544, 576, 608, 640, 672, 704])
+            if images.shape[-1] != new_size:
+                images = F.interpolate(images, size=(new_size, new_size), mode="bilinear", align_corners=False)
         window_start = (batch_index // accumulation_steps) * accumulation_steps
         window_end = min(window_start + accumulation_steps, len(loader))
         loss_scale = 1.0 / float(max(window_end - window_start, 1))
@@ -402,6 +413,7 @@ def main():
     print(f"AMP          : {args.use_mixed_precision}")
     print(f"Assigner     : {args.assigner}")
     print(f"Ckpt metric  : {args.checkpoint_metric}")
+    print(f"Compile      : {args.use_compile}")
     if args.eval_monitor_conf is not None:
         print(f"Monitor eval : conf={args.eval_monitor_conf}")
 
@@ -409,6 +421,10 @@ def main():
     model_config = build_model_config(args)
     model = DenseDet(**model_config).to(device)
     ema = ModelEMA(model, decay=args.ema_decay) if args.use_ema else None
+    if args.use_compile and hasattr(torch, "compile"):
+        print("  Enabling Torch Compile for speedup...")
+        # Compile after EMA creation to avoid deepcopy issues.
+        model = torch.compile(model, mode="reduce-overhead")
     counts = model.param_count()
     print(f"  Total params     : {counts['total']:,}")
     print(f"  Trainable params : {counts['trainable']:,}")
@@ -435,7 +451,14 @@ def main():
     print(f"  Train batches : {len(train_loader)}")
     print(f"  Val batches   : {len(val_loader)}")
 
-    loss_fn = DenseDetectionLoss(num_classes=args.num_classes, strides=model.strides, assigner=args.assigner, quality_loss_weight=args.quality_loss_weight)
+    loss_fn = DenseDetectionLoss(
+        num_classes=args.num_classes,
+        strides=model.strides,
+        assigner=args.assigner,
+        quality_loss_weight=args.quality_loss_weight,
+        atss_topk=args.atss_topk,
+        atss_anchor_scale=args.atss_anchor_scale,
+    )
     param_groups = build_param_groups(model, args.weight_decay)
     print(f"\nOptimizer param groups: {len(param_groups[0]['params'])} decay, {len(param_groups[1]['params'])} no-decay")
     optimizer = AdamW(param_groups, lr=args.lr, betas=(0.9, 0.999))
