@@ -28,7 +28,7 @@ train:
   use_ema: true
   ema_decay: 0.999
   mixed_precision: true
-  compile: true
+  compile: false
 
 optimizer:
   lr: 0.0004
