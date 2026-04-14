@@ -6,7 +6,6 @@ import argparse
 import csv
 import math
 import os
-import random
 import sys
 import time
 from collections.abc import Mapping
@@ -15,7 +14,6 @@ from copy import deepcopy
 import torch
 from torch import amp
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import AdamW
 
 try:
@@ -345,10 +343,6 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
         if max_batches is not None and batch_index >= max_batches:
             break
         images = images.to(device, non_blocking=True)
-        if batch_index % 10 == 0:
-            new_size = random.choice([480, 512, 544, 576, 608, 640, 672, 704])
-            if images.shape[-1] != new_size:
-                images = F.interpolate(images, size=(new_size, new_size), mode="bilinear", align_corners=False)
         window_start = (batch_index // accumulation_steps) * accumulation_steps
         window_end = min(window_start + accumulation_steps, total_batches)
         loss_scale = 1.0 / float(max(window_end - window_start, 1))

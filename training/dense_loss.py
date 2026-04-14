@@ -22,7 +22,7 @@ from utils.points import build_points
 def varifocal_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
-    alpha: float = 0.85,
+    alpha: float = 0.50,
     gamma: float = 2.0,
 ) -> torch.Tensor:
     pred_sigmoid = logits.sigmoid()

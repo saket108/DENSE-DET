@@ -18,14 +18,14 @@ data:
   image_size: 640
 
 train:
-  epochs: 45
+  epochs: 50
   patience: 8
   batch_size: 8
-  accumulation_steps: 4
+  accumulation_steps: 2
   num_workers: 2
   image_size: 640
   balanced_sampler: true
-  use_ema: true
+  use_ema: false
   ema_decay: 0.999
   mixed_precision: true
   compile: false
@@ -42,16 +42,16 @@ scheduler:
 loss:
   assigner: atss
   quality: 1.0
-  atss_topk: 12
-  atss_anchor_scale: 3.0
+  atss_topk: 9
+  atss_anchor_scale: 4.0
 
 augmentation:
-  enabled: true
+  enabled: false
   close_after_epochs: 35
   fliplr: 0.3
   flipud: 0.0
   rotate_deg: 5
-  mosaic_prob: 0.5
+  mosaic_prob: 0.0
   hsv_h: 0.005
   hsv_s: 0.1
   hsv_v: 0.05
@@ -67,7 +67,7 @@ eval:
   iou_thresh: 0.5
   nms_iou: 0.6
   max_det: 300
-  use_ema: true
+  use_ema: false
   during_train_every_epochs: 2
   during_train_max_batches: 50
   checkpoint_metric: map50_95
