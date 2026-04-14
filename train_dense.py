@@ -144,6 +144,7 @@ def parse_args():
     parser.add_argument("--save_dir", type=str, default=None)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--eval_every_epochs", type=int, default=None)
+    parser.add_argument("--train_max_batches", type=int, default=None)
     parser.add_argument("--eval_max_batches", type=int, default=None)
     parser.add_argument("--eval_conf", type=float, default=None)
     parser.add_argument("--monitor_conf", type=float, default=None)
@@ -160,6 +161,8 @@ def parse_args():
     parser.add_argument("--no_mixed_precision", dest="use_mixed_precision", action="store_false")
     parser.add_argument("--compile", dest="use_compile", action="store_true")
     parser.add_argument("--no_compile", dest="use_compile", action="store_false")
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--log_every", type=int, default=None)
     parser.add_argument("--variant", type=str, default=None)
     parser.add_argument("--backbone_dims", type=str, default=None)
     parser.add_argument("--backbone_depths", type=str, default=None)
@@ -208,6 +211,7 @@ def resolve_args(args):
         "save_dir": coalesce(args.save_dir, checkpoint_cfg.get("save_dir"), "runs/dense_det"),
         "resume": args.resume,
         "eval_every_epochs": coalesce(args.eval_every_epochs, eval_cfg.get("during_train_every_epochs"), 5),
+        "train_max_batches": args.train_max_batches,
         "eval_max_batches": coalesce(args.eval_max_batches, eval_cfg.get("during_train_max_batches")),
         "eval_conf": coalesce(args.eval_conf, eval_cfg.get("conf_thresh"), 0.05),
         "eval_monitor_conf": coalesce(args.monitor_conf, eval_cfg.get("monitor_conf_thresh")),
@@ -235,6 +239,7 @@ def resolve_args(args):
         "use_ema": coalesce(args.use_ema, train_cfg.get("use_ema"), True),
         "ema_decay": coalesce(train_cfg.get("ema_decay"), 0.9998),
         "use_mixed_precision": coalesce(args.use_mixed_precision, train_cfg.get("mixed_precision"), True),
+        "log_every_batches": coalesce(args.log_every, train_cfg.get("log_every_batches"), 0),
         "num_classes": num_classes,
         "class_names": class_names,
         "variant": coalesce(args.variant, model_cfg.get("variant"), "small"),
@@ -248,7 +253,15 @@ def resolve_args(args):
         "atss_anchor_scale": coalesce(loss_cfg.get("atss_anchor_scale"), 4.0),
         "benchmark": benchmark_cfg,
         "use_compile": coalesce(args.use_compile, train_cfg.get("compile"), False),
+        "smoke": bool(args.smoke),
     }
+    if resolved["smoke"]:
+        resolved["epochs"] = 1
+        resolved["patience"] = 0
+        resolved["train_max_batches"] = 2 if resolved["train_max_batches"] is None else resolved["train_max_batches"]
+        resolved["eval_every_epochs"] = 1
+        resolved["eval_max_batches"] = 2 if resolved["eval_max_batches"] is None else resolved["eval_max_batches"]
+        resolved["log_every_batches"] = 1
     require_existing_paths(train_images=resolved["train_images"], val_images=resolved["val_images"], train_labels=resolved["train_labels"], val_labels=resolved["val_labels"])
     return argparse.Namespace(**resolved)
 
@@ -320,20 +333,24 @@ def predictions_look_valid(all_preds: list[dict]) -> bool:
     return total > 0
 
 
-def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, total_epochs=None, ema=None, accumulation_steps=1, use_mixed_precision=True):
+def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, total_epochs=None, ema=None, accumulation_steps=1, use_mixed_precision=True, log_every_batches=0, max_batches=None):
     model.train()
-    total_loss, processed_batches = 0.0, 0
-    progress = tqdm(loader, total=len(loader), desc=f"Train {epoch}/{total_epochs or '?'}", dynamic_ncols=True, leave=True, disable=(tqdm is None or not sys.stdout.isatty())) if tqdm else None
+    total_loss, total_cls, total_box, total_qual, processed_batches = 0.0, 0.0, 0.0, 0.0, 0
+    total_pos = 0
+    total_batches = min(len(loader), max_batches) if max_batches is not None else len(loader)
+    progress = tqdm(loader, total=total_batches, desc=f"Train {epoch}/{total_epochs or '?'}", dynamic_ncols=True, leave=True, disable=(tqdm is None)) if tqdm else None
     iterator = progress or loader
     optimizer.zero_grad(set_to_none=True)
     for batch_index, (images, targets, _) in enumerate(iterator):
+        if max_batches is not None and batch_index >= max_batches:
+            break
         images = images.to(device, non_blocking=True)
         if batch_index % 10 == 0:
             new_size = random.choice([480, 512, 544, 576, 608, 640, 672, 704])
             if images.shape[-1] != new_size:
                 images = F.interpolate(images, size=(new_size, new_size), mode="bilinear", align_corners=False)
         window_start = (batch_index // accumulation_steps) * accumulation_steps
-        window_end = min(window_start + accumulation_steps, len(loader))
+        window_end = min(window_start + accumulation_steps, total_batches)
         loss_scale = 1.0 / float(max(window_end - window_start, 1))
         with amp.autocast(device_type=device.type, enabled=(use_mixed_precision and device.type == "cuda")):
             outputs = model(images)
@@ -343,7 +360,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
             scaler.scale(loss).backward()
         else:
             loss.backward()
-        if ((batch_index + 1) % accumulation_steps == 0) or ((batch_index + 1) == len(loader)):
+        if ((batch_index + 1) % accumulation_steps == 0) or ((batch_index + 1) == total_batches):
             if device.type == "cuda":
                 scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -360,21 +377,47 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
                 ema.update(model)
             optimizer.zero_grad(set_to_none=True)
         total_loss += losses.total.item()
+        total_cls += losses.cls.item()
+        total_box += losses.box.item()
+        total_qual += losses.qual.item()
+        total_pos += int(losses.positives)
         processed_batches += 1
         if progress is not None:
             progress.set_postfix({"loss": f"{total_loss / processed_batches:.4f}", "cls": f"{losses.cls.item():.3f}", "box": f"{losses.box.item():.3f}", "qual": f"{losses.qual.item():.3f}", "pos": losses.positives, "lr": f"{optimizer.param_groups[0]['lr']:.2e}", "acc": f"{((batch_index % accumulation_steps) + 1)}/{accumulation_steps}"})
+        if log_every_batches and ((batch_index + 1) % log_every_batches == 0 or (batch_index + 1) == total_batches):
+            avg_loss = total_loss / processed_batches
+            print(
+                f"Train {epoch}/{total_epochs or '?'} | "
+                f"it {batch_index + 1}/{total_batches} | "
+                f"loss {avg_loss:.4f} | "
+                f"cls {losses.cls.item():.3f} | "
+                f"box {losses.box.item():.3f} | "
+                f"qual {losses.qual.item():.3f} | "
+                f"pos {losses.positives} | "
+                f"lr {optimizer.param_groups[0]['lr']:.2e}"
+            )
     if progress is not None:
         progress.close()
-    return total_loss / max(processed_batches, 1)
+    denom = max(processed_batches, 1)
+    return {
+        "loss": total_loss / denom,
+        "cls": total_cls / denom,
+        "box": total_box / denom,
+        "qual": total_qual / denom,
+        "pos": total_pos / denom,
+    }
 
 
 @torch.no_grad()
-def validate(model, loader, loss_fn, device, epoch, use_mixed_precision=True):
+def validate(model, loader, loss_fn, device, epoch, use_mixed_precision=True, max_batches=None):
     model.eval()
     total_loss = 0.0
-    progress = tqdm(loader, total=len(loader), desc=f"Val {epoch}", dynamic_ncols=True, leave=True, disable=(tqdm is None or not sys.stdout.isatty())) if tqdm else None
+    total_batches = min(len(loader), max_batches) if max_batches is not None else len(loader)
+    progress = tqdm(loader, total=total_batches, desc=f"Val {epoch}", dynamic_ncols=True, leave=True, disable=(tqdm is None)) if tqdm else None
     iterator = progress or loader
     for batch_index, (images, targets, _) in enumerate(iterator):
+        if max_batches is not None and batch_index >= max_batches:
+            break
         images = images.to(device, non_blocking=True)
         with amp.autocast(device_type=device.type, enabled=(use_mixed_precision and device.type == "cuda")):
             outputs = model(images)
@@ -384,7 +427,7 @@ def validate(model, loader, loss_fn, device, epoch, use_mixed_precision=True):
             progress.set_postfix({"loss": f"{total_loss / (batch_index + 1):.4f}"})
     if progress is not None:
         progress.close()
-    return total_loss / max(len(loader), 1)
+    return total_loss / max(total_batches, 1)
 
 
 def main():
@@ -414,6 +457,8 @@ def main():
     print(f"Assigner     : {args.assigner}")
     print(f"Ckpt metric  : {args.checkpoint_metric}")
     print(f"Compile      : {args.use_compile}")
+    if args.smoke:
+        print(f"Smoke        : True  train_max_batches={args.train_max_batches}  eval_max_batches={args.eval_max_batches}")
     if args.eval_monitor_conf is not None:
         print(f"Monitor eval : conf={args.eval_monitor_conf}")
 
@@ -485,7 +530,7 @@ def main():
     history_path = os.path.join(args.save_dir, "train_history.csv")
     results_csv_path = os.path.join(args.save_dir, "results.csv")
     fields = ["epoch", "train_loss", "val_loss", "lr", "elapsed_sec", "best_val", "best_epoch", "epochs_without_improvement", "map50", "map5095", "macro_precision", "macro_recall", "micro_precision", "micro_recall"]
-    print(f"{'Epoch':<10} {'Train':>10} {'Val':>10} {'Prec':>8} {'Recall':>8} {'mAP50':>10} {'mAP50-95':>10} {'Sec':>8}")
+    print(f"{'Epoch':>8} {'GPU_mem':>8} {'box_loss':>10} {'cls_loss':>10} {'qual_loss':>10} {'Pos':>6} {'Size':>8}")
 
     save_preview_from_loader(train_loader, args.class_names, os.path.join(args.save_dir, "train_batch.jpg"))
     save_preview_from_loader(val_loader, args.class_names, os.path.join(args.save_dir, "val_batch_labels.jpg"))
@@ -494,13 +539,40 @@ def main():
         t0 = time.time()
         if hasattr(train_loader.dataset, "augmenter") and train_loader.dataset.augmenter is not None:
             train_loader.dataset.augmenter.set_epoch(epoch)
-        train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, scaler, device, epoch, total_epochs=args.epochs, ema=ema, accumulation_steps=args.accumulation_steps, use_mixed_precision=args.use_mixed_precision)
+        train_stats = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            loss_fn,
+            scaler,
+            device,
+            epoch,
+            total_epochs=args.epochs,
+            ema=ema,
+            accumulation_steps=args.accumulation_steps,
+            use_mixed_precision=args.use_mixed_precision,
+            log_every_batches=args.log_every_batches,
+            max_batches=args.train_max_batches,
+        )
+        train_loss = train_stats["loss"]
+        gpu_mem = ""
+        if device.type == "cuda":
+            gpu_mem = f"{torch.cuda.max_memory_allocated(device) / (1024 ** 3):.1f}G"
+            torch.cuda.reset_peak_memory_stats(device)
         eval_model = (
             ema.ema
             if args.eval_use_ema and ema is not None and epoch > args.warmup_epochs
             else model
         )
-        val_loss = validate(eval_model, val_loader, loss_fn, device, epoch, use_mixed_precision=args.use_mixed_precision)
+        val_loss = validate(
+            eval_model,
+            val_loader,
+            loss_fn,
+            device,
+            epoch,
+            use_mixed_precision=args.use_mixed_precision,
+            max_batches=args.eval_max_batches,
+        )
         map50 = map5095 = ""
         summary = None
         all_preds = all_targets = None
@@ -593,7 +665,29 @@ def main():
             epochs_without_improvement += 1
         macro_precision = None if summary is None else summary["macro_precision"]
         macro_recall = None if summary is None else summary["macro_recall"]
-        print(f"{f'{epoch}/{args.epochs}':<10} {train_loss:>10.4f} {val_loss:>10.4f} {format_metric(macro_precision, 3):>8} {format_metric(macro_recall, 3):>8} {format_metric(map50, 3):>10} {format_metric(map5095, 3):>10} {elapsed:>8.0f}")
+        print(
+            f"{f'{epoch}/{args.epochs}':>8} "
+            f"{gpu_mem:>8} "
+            f"{train_stats['box']:>10.3f} "
+            f"{train_stats['cls']:>10.3f} "
+            f"{train_stats['qual']:>10.3f} "
+            f"{train_stats['pos']:>6.0f} "
+            f"{args.imgsz:>8}"
+        )
+        if summary is not None:
+            images = args.benchmark.get("images") if isinstance(args.benchmark, Mapping) else None
+            instances = args.benchmark.get("instances") if isinstance(args.benchmark, Mapping) else None
+            images = images if images is not None else len(val_loader.dataset)
+            instances = instances if instances is not None else "n/a"
+            print(
+                f"{'all':>8} "
+                f"{images:>8} "
+                f"{instances:>10} "
+                f"{summary['macro_precision']:>10.3f} "
+                f"{summary['macro_recall']:>6.3f} "
+                f"{mean_metric(list(ap50.values())):>8.3f} "
+                f"{mean_metric(list(ap5095.values())):>10.3f}"
+            )
         row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": scheduler.get_last_lr()[0], "elapsed_sec": elapsed, "best_val": best_val, "best_epoch": best_epoch, "epochs_without_improvement": epochs_without_improvement, "map50": map50, "map5095": map5095, "macro_precision": "" if summary is None else summary["macro_precision"], "macro_recall": "" if summary is None else summary["macro_recall"], "micro_precision": "" if summary is None else summary["micro_precision"], "micro_recall": "" if summary is None else summary["micro_recall"]}
         append_csv_row(history_path, fields, row)
         append_csv_row(results_csv_path, fields, row)
