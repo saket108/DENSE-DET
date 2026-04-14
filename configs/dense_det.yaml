@@ -30,7 +30,7 @@ train:
   mixed_precision: true
 
 optimizer:
-  lr: 0.0006
+  lr: 0.0004
   weight_decay: 0.01
 
 scheduler:
@@ -43,7 +43,7 @@ loss:
 
 augmentation:
   enabled: true
-  close_after_epochs: 20
+  close_after_epochs: 35
   fliplr: 0.3
   flipud: 0.0
   rotate_deg: 5

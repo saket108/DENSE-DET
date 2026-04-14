@@ -296,6 +296,23 @@ def format_metric(value, digits=4):
     return "n/a" if value == "" or value is None else f"{value:.{digits}f}"
 
 
+def predictions_look_valid(all_preds: list[dict]) -> bool:
+    if not all_preds:
+        return False
+    total = 0
+    for pred in all_preds:
+        conf = pred.get("confidences")
+        boxes = pred.get("boxes")
+        if conf is None or boxes is None:
+            return False
+        total += int(conf.numel())
+        if conf.numel() and not torch.isfinite(conf).all():
+            return False
+        if boxes.numel() and not torch.isfinite(boxes).all():
+            return False
+    return total > 0
+
+
 def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, total_epochs=None, ema=None, accumulation_steps=1, use_mixed_precision=True):
     model.train()
     total_loss, processed_batches = 0.0, 0
@@ -464,6 +481,7 @@ def main():
         map50 = map5095 = ""
         summary = None
         all_preds = all_targets = None
+        eval_metrics_model = eval_model
         if args.eval_every_epochs and epoch % args.eval_every_epochs == 0:
             ap50, ap5095, pr_metrics, summary, all_preds, all_targets = run_dense_evaluation_with_raw(
                 eval_model,
@@ -480,6 +498,29 @@ def main():
                 current_epoch=epoch,
                 warmup_quality_epochs=10,
             )
+            if (
+                args.eval_use_ema
+                and ema is not None
+                and eval_model is ema.ema
+                and not predictions_look_valid(all_preds)
+            ):
+                print("  EMA eval produced empty/invalid predictions; retrying with raw model.")
+                eval_metrics_model = model
+                ap50, ap5095, pr_metrics, summary, all_preds, all_targets = run_dense_evaluation_with_raw(
+                    eval_metrics_model,
+                    val_loader,
+                    device,
+                    num_classes=args.num_classes,
+                    conf_thresh=args.eval_conf,
+                    match_iou=args.eval_iou,
+                    nms_iou=args.eval_nms_iou,
+                    max_batches=args.eval_max_batches,
+                    max_det=args.eval_max_det,
+                    verbose=False,
+                    progress_label=f"Eval {epoch}/{args.epochs}",
+                    current_epoch=epoch,
+                    warmup_quality_epochs=10,
+                )
             map50 = mean_metric(list(ap50.values()))
             map5095 = mean_metric(list(ap5095.values()))
             print_benchmark_comparison(ap50, ap5095, pr_metrics, summary, args.benchmark, args.class_names)
@@ -488,7 +529,7 @@ def main():
                 and float(args.eval_monitor_conf) > float(args.eval_conf)
             ):
                 mon_ap50, mon_ap5095, _, mon_summary, _, _ = run_dense_evaluation_with_raw(
-                    eval_model,
+                    eval_metrics_model,
                     val_loader,
                     device,
                     num_classes=args.num_classes,
