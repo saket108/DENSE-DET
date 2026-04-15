@@ -314,6 +314,123 @@ def format_metric(value, digits=4):
     return "n/a" if value == "" or value is None else f"{value:.{digits}f}"
 
 
+_W_EPOCH = 10
+_W_GMEM = 8
+_W_LOSS = 9
+_W_INST = 10
+_W_SIZE = 6
+_W_METRIC = 9
+
+
+def _gpu_mem_str() -> str:
+    if not torch.cuda.is_available():
+        return "0.00G"
+    return f"{(torch.cuda.memory_reserved() / 1e9):.2f}G"
+
+
+def _header_line() -> str:
+    parts = [
+        f"{'Epoch':<{_W_EPOCH}}",
+        f"{'GPU_mem':>{_W_GMEM}}",
+        f"{'box_loss':>{_W_LOSS}}",
+        f"{'cls_loss':>{_W_LOSS}}",
+        f"{'qual_loss':>{_W_LOSS}}",
+        f"{'instances':>{_W_INST}}",
+        f"{'size':>{_W_SIZE}}",
+    ]
+    return "  ".join(parts)
+
+
+def _eval_header_line() -> str:
+    parts = [
+        f"{'Class':<20}",
+        f"{'Images':>{_W_METRIC}}",
+        f"{'Instances':>{_W_METRIC}}",
+        f"{'P':>{_W_METRIC}}",
+        f"{'R':>{_W_METRIC}}",
+        f"{'mAP50':>{_W_METRIC}}",
+        f"{'mAP50-95':>{_W_METRIC}}",
+    ]
+    return "  ".join(parts)
+
+
+def print_train_header() -> None:
+    print(f"\n{_header_line()}")
+
+
+def _make_postfix(box: float, cls: float, qual: float, positives: int, img_size: int, mem: str, epoch: int, total_epochs: int | str) -> str:
+    return (
+        f"{epoch}/{total_epochs}  "
+        f"{mem:>{_W_GMEM}}  "
+        f"{box:>{_W_LOSS}.4f}  "
+        f"{cls:>{_W_LOSS}.4f}  "
+        f"{qual:>{_W_LOSS}.4f}  "
+        f"{positives:>{_W_INST}}  "
+        f"{img_size:>{_W_SIZE}}"
+    )
+
+
+def print_eval_table(ap50: dict, ap5095: dict, pr_metrics: dict, summary: dict, num_images: int, num_instances: int, class_names: list[str] | None = None) -> None:
+    print(f"\n{'':>7}{_eval_header_line()}")
+    num_classes = max(len(class_names or []), len(ap50))
+    for cls_id in range(num_classes):
+        name = class_names[cls_id] if class_names and cls_id < len(class_names) else str(cls_id)
+        a50 = ap50.get(cls_id, 0.0)
+        a95 = ap5095.get(cls_id, 0.0)
+        pr = pr_metrics.get(cls_id, {})
+        p = float(pr.get("precision", 0.0))
+        r = float(pr.get("recall", 0.0))
+        n_gt = int(pr.get("num_gt", 0))
+        print(
+            f"  {name:<20}"
+            f"{num_images:>{_W_METRIC}}"
+            f"{n_gt:>{_W_METRIC}}"
+            f"{p:>{_W_METRIC}.3f}"
+            f"{r:>{_W_METRIC}.3f}"
+            f"{a50:>{_W_METRIC}.3f}"
+            f"{a95:>{_W_METRIC}.3f}"
+        )
+
+    mp = float(summary["macro_precision"])
+    mr = float(summary["macro_recall"])
+    m50 = mean_metric(list(ap50.values()))
+    m95 = mean_metric(list(ap5095.values()))
+    print(
+        f"  {'all':<20}"
+        f"{num_images:>{_W_METRIC}}"
+        f"{num_instances:>{_W_METRIC}}"
+        f"{mp:>{_W_METRIC}.3f}"
+        f"{mr:>{_W_METRIC}.3f}"
+        f"{m50:>{_W_METRIC}.3f}"
+        f"{m95:>{_W_METRIC}.3f}"
+    )
+
+
+def print_epoch_summary(epoch: int, total_epochs: int, train_loss: float, val_loss: float, train_stats: dict | None, map50, map5095, summary: dict | None, elapsed: float, checkpoint_improved: bool = False, best_score: float | None = None) -> None:
+    box = "n/a" if train_stats is None else f"{train_stats['box']:.4f}"
+    cls = "n/a" if train_stats is None else f"{train_stats['cls']:.4f}"
+    qual = "n/a" if train_stats is None else f"{train_stats['qual']:.4f}"
+    prec = format_metric(summary["macro_precision"], 3) if summary else "n/a"
+    rec = format_metric(summary["macro_recall"], 3) if summary else "n/a"
+    print(
+        f"\n{'':>2}"
+        f"{f'{epoch}/{total_epochs}':<{_W_EPOCH}}"
+        f"  {_gpu_mem_str():>{_W_GMEM}}"
+        f"  {box:>{_W_LOSS}}"
+        f"  {cls:>{_W_LOSS}}"
+        f"  {qual:>{_W_LOSS}}"
+        f"  train={train_loss:.4f}"
+        f"  val={val_loss:.4f}"
+        f"  P={prec}"
+        f"  R={rec}"
+        f"  mAP50={format_metric(map50, 3)}"
+        f"  mAP50-95={format_metric(map5095, 3)}"
+        f"  {elapsed:.0f}s"
+    )
+    if checkpoint_improved and best_score is not None:
+        print(f"  {'':>2}New best: {best_score:.4f}")
+
+
 def predictions_look_valid(all_preds: list[dict]) -> bool:
     if not all_preds:
         return False
@@ -336,7 +453,17 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
     total_loss, total_cls, total_box, total_qual, processed_batches = 0.0, 0.0, 0.0, 0.0, 0
     total_pos = 0
     total_batches = min(len(loader), max_batches) if max_batches is not None else len(loader)
-    progress = tqdm(loader, total=total_batches, desc=f"Train {epoch}/{total_epochs or '?'}", dynamic_ncols=True, leave=True, disable=(tqdm is None)) if tqdm else None
+    mem = _gpu_mem_str()
+    bar_fmt = "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+    progress = tqdm(
+        loader,
+        total=total_batches,
+        desc=f"{epoch}/{total_epochs or '?'}",
+        bar_format=bar_fmt,
+        dynamic_ncols=True,
+        leave=True,
+        disable=(tqdm is None),
+    ) if tqdm else None
     iterator = progress or loader
     optimizer.zero_grad(set_to_none=True)
     for batch_index, (images, targets, _) in enumerate(iterator):
@@ -370,6 +497,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
             if step_successful and ema is not None:
                 ema.update(model)
             optimizer.zero_grad(set_to_none=True)
+            mem = _gpu_mem_str()
         total_loss += losses.total.item()
         total_cls += losses.cls.item()
         total_box += losses.box.item()
@@ -377,18 +505,17 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
         total_pos += int(losses.positives)
         processed_batches += 1
         if progress is not None:
-            progress.set_postfix({"loss": f"{total_loss / processed_batches:.4f}", "cls": f"{losses.cls.item():.3f}", "box": f"{losses.box.item():.3f}", "qual": f"{losses.qual.item():.3f}", "pos": losses.positives, "lr": f"{optimizer.param_groups[0]['lr']:.2e}", "acc": f"{((batch_index % accumulation_steps) + 1)}/{accumulation_steps}"})
-        if log_every_batches and ((batch_index + 1) % log_every_batches == 0 or (batch_index + 1) == total_batches):
-            avg_loss = total_loss / processed_batches
-            print(
-                f"Train {epoch}/{total_epochs or '?'} | "
-                f"it {batch_index + 1}/{total_batches} | "
-                f"loss {avg_loss:.4f} | "
-                f"cls {losses.cls.item():.3f} | "
-                f"box {losses.box.item():.3f} | "
-                f"qual {losses.qual.item():.3f} | "
-                f"pos {losses.positives} | "
-                f"lr {optimizer.param_groups[0]['lr']:.2e}"
+            progress.set_description_str(
+                _make_postfix(
+                    box=losses.box.item(),
+                    cls=losses.cls.item(),
+                    qual=losses.qual.item(),
+                    positives=losses.positives,
+                    img_size=images.shape[-1],
+                    mem=mem,
+                    epoch=epoch,
+                    total_epochs=total_epochs or "?",
+                )
             )
     if progress is not None:
         progress.close()
@@ -407,7 +534,16 @@ def validate(model, loader, loss_fn, device, epoch, use_mixed_precision=True, ma
     model.eval()
     total_loss = 0.0
     total_batches = min(len(loader), max_batches) if max_batches is not None else len(loader)
-    progress = tqdm(loader, total=total_batches, desc=f"Val {epoch}", dynamic_ncols=True, leave=True, disable=(tqdm is None)) if tqdm else None
+    bar_fmt = "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+    progress = tqdm(
+        loader,
+        total=total_batches,
+        desc="val",
+        bar_format=bar_fmt,
+        dynamic_ncols=True,
+        leave=False,
+        disable=(tqdm is None),
+    ) if tqdm else None
     iterator = progress or loader
     for batch_index, (images, targets, _) in enumerate(iterator):
         if max_batches is not None and batch_index >= max_batches:
@@ -417,8 +553,6 @@ def validate(model, loader, loss_fn, device, epoch, use_mixed_precision=True, ma
             outputs = model(images)
             losses = loss_fn(outputs, targets)
         total_loss += losses.total.item()
-        if progress is not None:
-            progress.set_postfix({"loss": f"{total_loss / (batch_index + 1):.4f}"})
     if progress is not None:
         progress.close()
     return total_loss / max(total_batches, 1)
@@ -524,7 +658,7 @@ def main():
     history_path = os.path.join(args.save_dir, "train_history.csv")
     results_csv_path = os.path.join(args.save_dir, "results.csv")
     fields = ["epoch", "train_loss", "val_loss", "lr", "elapsed_sec", "best_val", "best_epoch", "epochs_without_improvement", "map50", "map5095", "macro_precision", "macro_recall", "micro_precision", "micro_recall"]
-    print(f"{'Epoch':>8} {'GPU_mem':>8} {'box_loss':>10} {'cls_loss':>10} {'qual_loss':>10} {'Pos':>6} {'Size':>8}")
+    print_train_header()
 
     save_preview_from_loader(train_loader, args.class_names, os.path.join(args.save_dir, "train_batch.jpg"))
     save_preview_from_loader(val_loader, args.class_names, os.path.join(args.save_dir, "val_batch_labels.jpg"))
@@ -612,34 +746,6 @@ def main():
                 )
             map50 = mean_metric(list(ap50.values()))
             map5095 = mean_metric(list(ap5095.values()))
-            print_benchmark_comparison(ap50, ap5095, pr_metrics, summary, args.benchmark, args.class_names)
-            if (
-                args.eval_monitor_conf is not None
-                and float(args.eval_monitor_conf) > float(args.eval_conf)
-            ):
-                mon_ap50, mon_ap5095, _, mon_summary, _, _ = run_dense_evaluation_with_raw(
-                    eval_metrics_model,
-                    val_loader,
-                    device,
-                    num_classes=args.num_classes,
-                    conf_thresh=float(args.eval_monitor_conf),
-                    match_iou=args.eval_iou,
-                    nms_iou=args.eval_nms_iou,
-                    max_batches=args.eval_max_batches,
-                    max_det=args.eval_max_det,
-                    verbose=False,
-                    progress_label=f"Monitor {epoch}/{args.epochs}",
-                    current_epoch=epoch,
-                    warmup_quality_epochs=10,
-                )
-                print(
-                    "  Monitor @ "
-                    f"conf={float(args.eval_monitor_conf):.2f} | "
-                    f"Prec={mon_summary['macro_precision']:.3f} "
-                    f"Recall={mon_summary['macro_recall']:.3f} "
-                    f"mAP50={mean_metric(list(mon_ap50.values())):.3f} "
-                    f"mAP50-95={mean_metric(list(mon_ap5095.values())):.3f}"
-                )
             if all_preds is not None and all_targets is not None:
                 save_detection_artifacts(all_preds, all_targets, args.class_names, args.save_dir, iou_threshold=args.eval_iou)
         scheduler.step()
@@ -657,31 +763,33 @@ def main():
             best_checkpoint_score, best_epoch, epochs_without_improvement = float(checkpoint_score), epoch, 0
         elif epoch > args.warmup_epochs and summary is not None:
             epochs_without_improvement += 1
-        macro_precision = None if summary is None else summary["macro_precision"]
-        macro_recall = None if summary is None else summary["macro_recall"]
-        print(
-            f"{f'{epoch}/{args.epochs}':>8} "
-            f"{gpu_mem:>8} "
-            f"{train_stats['box']:>10.3f} "
-            f"{train_stats['cls']:>10.3f} "
-            f"{train_stats['qual']:>10.3f} "
-            f"{train_stats['pos']:>6.0f} "
-            f"{args.imgsz:>8}"
-        )
         if summary is not None:
             images = args.benchmark.get("images") if isinstance(args.benchmark, Mapping) else None
             instances = args.benchmark.get("instances") if isinstance(args.benchmark, Mapping) else None
             images = images if images is not None else len(val_loader.dataset)
             instances = instances if instances is not None else "n/a"
-            print(
-                f"{'all':>8} "
-                f"{images:>8} "
-                f"{instances:>10} "
-                f"{summary['macro_precision']:>10.3f} "
-                f"{summary['macro_recall']:>6.3f} "
-                f"{mean_metric(list(ap50.values())):>8.3f} "
-                f"{mean_metric(list(ap5095.values())):>10.3f}"
+            print_eval_table(
+                ap50,
+                ap5095,
+                pr_metrics,
+                summary,
+                images,
+                instances,
+                args.class_names,
             )
+        print_epoch_summary(
+            epoch,
+            args.epochs,
+            train_loss,
+            val_loss,
+            train_stats,
+            map50,
+            map5095,
+            summary,
+            elapsed,
+            checkpoint_improved=improved,
+            best_score=best_checkpoint_score if improved else None,
+        )
         row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": scheduler.get_last_lr()[0], "elapsed_sec": elapsed, "best_val": best_val, "best_epoch": best_epoch, "epochs_without_improvement": epochs_without_improvement, "map50": map50, "map5095": map5095, "macro_precision": "" if summary is None else summary["macro_precision"], "macro_recall": "" if summary is None else summary["macro_recall"], "micro_precision": "" if summary is None else summary["micro_precision"], "micro_recall": "" if summary is None else summary["micro_recall"]}
         append_csv_row(history_path, fields, row)
         append_csv_row(results_csv_path, fields, row)
@@ -689,8 +797,6 @@ def main():
         save_checkpoint(model, optimizer, scheduler, epoch, val_loss, args.save_dir, "last", model_config, best_val, best_epoch, epochs_without_improvement, best_checkpoint_score, train_loss=train_loss, ema=ema, ema_decay=args.ema_decay)
         if improved:
             save_checkpoint(model, optimizer, scheduler, epoch, val_loss, args.save_dir, "best", model_config, best_val, best_epoch, epochs_without_improvement, best_checkpoint_score, train_loss=train_loss, ema=ema, ema_decay=args.ema_decay)
-            metric_label = "mAP50-95" if args.checkpoint_metric == "map50_95" else args.checkpoint_metric
-            print(f"  New best checkpoint by {metric_label}: {best_checkpoint_score:.4f}")
         if args.patience and epoch > args.warmup_epochs and epochs_without_improvement >= args.patience:
             print(f"  Early stopping at epoch {epoch}: no improvement for {epochs_without_improvement} epochs (best epoch: {best_epoch}, best score: {best_checkpoint_score:.4f})")
             break

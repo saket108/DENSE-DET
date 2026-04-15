@@ -25,7 +25,7 @@ train:
   num_workers: 2
   image_size: 640
   balanced_sampler: true
-  use_ema: false
+  use_ema: true
   ema_decay: 0.999
   mixed_precision: true
   compile: false
@@ -41,8 +41,8 @@ scheduler:
 
 loss:
   assigner: atss
-  quality: 1.0
-  atss_topk: 9
+  quality: 0.0
+  atss_topk: 13
   atss_anchor_scale: 4.0
 
 augmentation:

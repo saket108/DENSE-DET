@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import torch
-from torch import nn
+import torch.nn 
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
