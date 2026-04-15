@@ -19,6 +19,7 @@ class ConvBNAct(nn.Sequential):
         act: bool = True,
     ) -> None:
         padding = kernel_size // 2 * dilation
+        num_norm_groups = min(32, out_channels) if out_channels >= 4 else 1
         layers = [
             nn.Conv2d(
                 in_channels,
@@ -30,7 +31,7 @@ class ConvBNAct(nn.Sequential):
                 dilation=dilation,
                 bias=False,
             ),
-            nn.BatchNorm2d(out_channels),
+            nn.GroupNorm(num_norm_groups, out_channels),
         ]
         if act:
             layers.append(nn.SiLU(inplace=True))

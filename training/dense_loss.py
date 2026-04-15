@@ -148,6 +148,9 @@ class DenseDetectionLoss(nn.Module):
         qual_loss = pred_cls.new_tensor(0.0)
         total_pos = 0
 
+        # Process each batch sample: assign targets and compute losses
+        # Note: Future optimization opportunity - vectorize _assign_targets to process batch dimension
+        # by stacking all gt_boxes/labels with batch indices instead of per-sample loop
         for batch_index, target in enumerate(targets):
             gt_boxes = target["boxes"]
             if gt_boxes.numel() > 0:

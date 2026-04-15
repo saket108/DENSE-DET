@@ -26,7 +26,7 @@ train:
   image_size: 640
   balanced_sampler: true
   use_ema: true
-  ema_decay: 0.999
+  ema_decay: 0.995
   mixed_precision: true
   compile: false
   log_every_batches: 50
