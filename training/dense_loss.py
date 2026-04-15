@@ -22,7 +22,7 @@ from utils.points import build_points
 def varifocal_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
-    alpha: float = 0.50,
+    alpha: float = 0.55,
     gamma: float = 2.0,
 ) -> torch.Tensor:
     pred_sigmoid = logits.sigmoid()
@@ -183,7 +183,7 @@ class DenseDetectionLoss(nn.Module):
 
             cls_loss = cls_loss + varifocal_loss(pred_cls[batch_index], cls_targets).sum()
 
-        normalizer = max(total_pos, 1)
+        normalizer = max(total_pos, batch_size)
         cls_loss = cls_loss / normalizer
         box_loss = box_loss / normalizer
         qual_loss = qual_loss / normalizer

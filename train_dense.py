@@ -484,7 +484,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler, device, epoch, to
         if ((batch_index + 1) % accumulation_steps == 0) or ((batch_index + 1) == total_batches):
             if device.type == "cuda":
                 scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=35.0)
             step_successful = False
             if device.type == "cuda":
                 scale_before = scaler.get_scale()
