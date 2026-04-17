@@ -53,6 +53,7 @@ class DenseDetectionLoss(nn.Module):
         atss_topk: int = 9,
         atss_anchor_scale: float = 4.0,
         quality_loss_weight: float = 1.0,
+        vfl_alpha: float = 0.55,
     ) -> None:
         super().__init__()
         self.num_classes = int(num_classes)
@@ -63,6 +64,7 @@ class DenseDetectionLoss(nn.Module):
         self.atss_topk = int(atss_topk)
         self.atss_anchor_scale = float(atss_anchor_scale)
         self.quality_loss_weight = float(quality_loss_weight)
+        self.vfl_alpha = float(vfl_alpha)
 
         if self.assigner not in {"fcos", "atss"}:
             raise ValueError("assigner must be either 'fcos' or 'atss'.")
@@ -184,7 +186,11 @@ class DenseDetectionLoss(nn.Module):
                         reduction="sum",
                     )
 
-            cls_loss = cls_loss + varifocal_loss(pred_cls[batch_index], cls_targets).sum()
+            cls_loss = cls_loss + varifocal_loss(
+                pred_cls[batch_index],
+                cls_targets,
+                alpha=self.vfl_alpha,
+            ).sum()
 
         normalizer = max(total_pos, batch_size)
         cls_loss = cls_loss / normalizer

@@ -167,6 +167,9 @@ def parse_args():
     parser.add_argument("--head_depth", type=int, default=None)
     parser.add_argument("--quality_head", dest="use_quality_head", action="store_true")
     parser.add_argument("--no_quality_head", dest="use_quality_head", action="store_false")
+    parser.add_argument("--quality_loss_weight", type=float, default=None)
+    parser.add_argument("--atss_topk", type=int, default=None)
+    parser.add_argument("--vfl_alpha", type=float, default=None)
     parser.set_defaults(balanced_sampler=None, augment=None, use_ema=None, use_mixed_precision=None, use_compile=None, use_quality_head=None)
     return parser.parse_args()
 
@@ -246,9 +249,10 @@ def resolve_args(args):
         "head_depth": coalesce(args.head_depth, model_cfg.get("head_depth"), 2),
         "use_quality_head": coalesce(args.use_quality_head, model_cfg.get("use_quality_head"), True),
         "assigner": coalesce(loss_cfg.get("assigner"), "atss"),
-        "quality_loss_weight": coalesce(loss_cfg.get("quality"), 1.0),
-        "atss_topk": coalesce(loss_cfg.get("atss_topk"), 9),
+        "quality_loss_weight": coalesce(args.quality_loss_weight, loss_cfg.get("quality"), 1.0),
+        "atss_topk": coalesce(args.atss_topk, loss_cfg.get("atss_topk"), 9),
         "atss_anchor_scale": coalesce(loss_cfg.get("atss_anchor_scale"), 4.0),
+        "vfl_alpha": coalesce(args.vfl_alpha, loss_cfg.get("vfl_alpha"), 0.55),
         "benchmark": benchmark_cfg,
         "use_compile": coalesce(args.use_compile, train_cfg.get("compile"), False),
         "smoke": bool(args.smoke),
@@ -631,6 +635,7 @@ def main():
         quality_loss_weight=args.quality_loss_weight,
         atss_topk=args.atss_topk,
         atss_anchor_scale=args.atss_anchor_scale,
+        vfl_alpha=args.vfl_alpha,
     )
     param_groups = build_param_groups(model, args.weight_decay)
     print(f"\nOptimizer param groups: {len(param_groups[0]['params'])} decay, {len(param_groups[1]['params'])} no-decay")
