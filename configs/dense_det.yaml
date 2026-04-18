@@ -2,7 +2,7 @@ model:
   variant: small
   backbone_dims: [16, 32, 64, 128]
   backbone_depths: [2, 2, 4, 2]
-  head_depth: 3
+  head_depth: 2
   use_quality_head: true
 
 data:
@@ -23,6 +23,7 @@ train:
   batch_size: 8
   accumulation_steps: 1
   num_workers: 8
+  background_weight: 1.0
   image_size: 640
   balanced_sampler: true
   use_ema: true
@@ -36,19 +37,21 @@ optimizer:
   weight_decay: 0.01
 
 scheduler:
-  warmup_epochs: 5
+  warmup_epochs: 0
   eta_min_ratio: 0.05
 
 loss:
   assigner: atss
-  quality: 1.5
+  quality: 2.0
   atss_topk: 5
   atss_anchor_scale: 4.0
-  vfl_alpha: 0.25
+  atss_min_iou_threshold: 0.05
+  vfl_alpha: 0.50
+  vfl_gamma: 2.0
 
 augmentation:
   enabled: true
-  close_after_epochs: 60
+  close_after_epochs: 40
   fliplr: 0.3
   flipud: 0.0
   rotate_deg: 5
@@ -64,7 +67,7 @@ augmentation:
 eval:
   batch_size: 8
   conf_thresh: 0.05
-  monitor_conf_thresh: 0.25
+  monitor_conf_thresh: 0.45
   iou_thresh: 0.5
   nms_iou: 0.6
   max_det: 300

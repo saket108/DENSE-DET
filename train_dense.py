@@ -170,6 +170,8 @@ def parse_args():
     parser.add_argument("--quality_loss_weight", type=float, default=None)
     parser.add_argument("--atss_topk", type=int, default=None)
     parser.add_argument("--vfl_alpha", type=float, default=None)
+    parser.add_argument("--vfl_gamma", type=float, default=None)
+    parser.add_argument("--atss_min_iou_threshold", type=float, default=None)
     parser.set_defaults(balanced_sampler=None, augment=None, use_ema=None, use_mixed_precision=None, use_compile=None, use_quality_head=None)
     return parser.parse_args()
 
@@ -209,6 +211,7 @@ def resolve_args(args):
         "weight_decay": coalesce(args.weight_decay, optimizer_cfg.get("weight_decay"), 0.01),
         "imgsz": coalesce(args.imgsz, train_cfg.get("image_size"), data_cfg.get("image_size"), 640),
         "workers": args.workers if args.workers is not None else coalesce(train_cfg.get("num_workers"), 4),
+        "background_weight": coalesce(train_cfg.get("background_weight")),
         "save_dir": coalesce(args.save_dir, checkpoint_cfg.get("save_dir"), "runs/dense_det"),
         "resume": args.resume,
         "eval_every_epochs": coalesce(args.eval_every_epochs, eval_cfg.get("during_train_every_epochs"), 5),
@@ -253,6 +256,8 @@ def resolve_args(args):
         "atss_topk": coalesce(args.atss_topk, loss_cfg.get("atss_topk"), 9),
         "atss_anchor_scale": coalesce(loss_cfg.get("atss_anchor_scale"), 4.0),
         "vfl_alpha": coalesce(args.vfl_alpha, loss_cfg.get("vfl_alpha"), 0.55),
+        "vfl_gamma": coalesce(args.vfl_gamma, loss_cfg.get("vfl_gamma"), 2.0),
+        "atss_min_iou_threshold": coalesce(args.atss_min_iou_threshold, loss_cfg.get("atss_min_iou_threshold"), 0.1),
         "benchmark": benchmark_cfg,
         "use_compile": coalesce(args.use_compile, train_cfg.get("compile"), False),
         "smoke": bool(args.smoke),
@@ -623,7 +628,7 @@ def main():
         erasing_prob=args.augment_erasing_prob,
         image_size=args.imgsz,
     )
-    train_loader = build_train_loader(args.train_images, args.train_labels, batch_size=args.batch, image_size=args.imgsz, num_workers=args.workers, balanced=args.balanced_sampler, class_names=args.class_names, augmenter=augmenter)
+    train_loader = build_train_loader(args.train_images, args.train_labels, batch_size=args.batch, image_size=args.imgsz, num_workers=args.workers, balanced=args.balanced_sampler, class_names=args.class_names, augmenter=augmenter, background_weight=args.background_weight)
     val_loader = build_val_loader(args.val_images, args.val_labels, batch_size=args.eval_batch, image_size=args.imgsz, num_workers=args.workers, class_names=args.class_names)
     print(f"  Train batches : {len(train_loader)}")
     print(f"  Val batches   : {len(val_loader)}")
@@ -636,6 +641,8 @@ def main():
         atss_topk=args.atss_topk,
         atss_anchor_scale=args.atss_anchor_scale,
         vfl_alpha=args.vfl_alpha,
+        vfl_gamma=args.vfl_gamma,
+        atss_min_iou_threshold=args.atss_min_iou_threshold,
     )
     param_groups = build_param_groups(model, args.weight_decay)
     print(f"\nOptimizer param groups: {len(param_groups[0]['params'])} decay, {len(param_groups[1]['params'])} no-decay")

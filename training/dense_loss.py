@@ -54,6 +54,8 @@ class DenseDetectionLoss(nn.Module):
         atss_anchor_scale: float = 4.0,
         quality_loss_weight: float = 1.0,
         vfl_alpha: float = 0.55,
+        vfl_gamma: float = 2.0,
+        atss_min_iou_threshold: float = 0.1,
     ) -> None:
         super().__init__()
         self.num_classes = int(num_classes)
@@ -65,6 +67,8 @@ class DenseDetectionLoss(nn.Module):
         self.atss_anchor_scale = float(atss_anchor_scale)
         self.quality_loss_weight = float(quality_loss_weight)
         self.vfl_alpha = float(vfl_alpha)
+        self.vfl_gamma = float(vfl_gamma)
+        self.atss_min_iou_threshold = float(atss_min_iou_threshold)
 
         if self.assigner not in {"fcos", "atss"}:
             raise ValueError("assigner must be either 'fcos' or 'atss'.")
@@ -190,6 +194,7 @@ class DenseDetectionLoss(nn.Module):
                 pred_cls[batch_index],
                 cls_targets,
                 alpha=self.vfl_alpha,
+                gamma=self.vfl_gamma,
             ).sum()
 
         normalizer = max(total_pos, batch_size)
@@ -343,7 +348,7 @@ class DenseDetectionLoss(nn.Module):
         iou_sq_sum = (candidate_ious ** 2).sum(dim=0)
         iou_var = (iou_sq_sum / iou_count - iou_mean ** 2).clamp(min=0)
         
-        iou_thresh = (iou_mean + iou_var.sqrt()).clamp(min=0.1).unsqueeze(0)
+        iou_thresh = (iou_mean + iou_var.sqrt()).clamp(min=self.atss_min_iou_threshold).unsqueeze(0)
 
         positive_mask = candidate_mask & (anchor_ious >= iou_thresh) & inside_box
 

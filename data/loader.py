@@ -518,6 +518,7 @@ def build_train_loader(
     balanced: bool = True,
     class_names: list[str] | None = None,
     augmenter: DetectionAugmenter | None = None,
+    background_weight: float | None = None,
 ) -> DataLoader:
     dataset = StandardDetectionDataset(
         images_dir=images_dir,
@@ -530,7 +531,7 @@ def build_train_loader(
     if len(dataset) == 0:
         raise ValueError(f"No training images found in '{images_dir}'.")
 
-    sampler = ClassBalancedSampler(dataset) if balanced else None
+    sampler = ClassBalancedSampler(dataset, background_weight=background_weight) if balanced else None
     return DataLoader(
         dataset,
         batch_size=batch_size,
