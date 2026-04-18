@@ -47,6 +47,34 @@ def build_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
     return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
 
 
+def resolve_class_filter(include_classes, source_class_names: list[str] | None) -> tuple[list[str] | None, dict[int, int] | None]:
+    if include_classes is None:
+        return source_class_names, None
+    if not isinstance(include_classes, (list, tuple)):
+        include_classes = [include_classes]
+
+    selected_ids: list[int] = []
+    selected_names: list[str] = []
+    source_class_names = source_class_names or []
+    for item in include_classes:
+        if isinstance(item, str) and not item.isdigit():
+            if item not in source_class_names:
+                raise ValueError(f"Unknown include_classes entry '{item}'. Known classes: {source_class_names}")
+            class_id = source_class_names.index(item)
+            class_name = item
+        else:
+            class_id = int(item)
+            class_name = source_class_names[class_id] if 0 <= class_id < len(source_class_names) else f"class_{class_id}"
+        if class_id in selected_ids:
+            continue
+        selected_ids.append(class_id)
+        selected_names.append(class_name)
+
+    if not selected_ids:
+        raise ValueError("include_classes must select at least one class.")
+    return selected_names, {old_id: new_id for new_id, old_id in enumerate(selected_ids)}
+
+
 class WarmupCosineScheduler:
     def __init__(self, optimizer, total_epochs: int, warmup_epochs: int = 0, min_lr_ratio: float = 0.05, last_epoch: int = 0):
         self.optimizer = optimizer
@@ -192,7 +220,8 @@ def resolve_args(args):
     train_paths = resolve_detection_paths(args.data_config, args.dataset_root, "train", args.train_images, args.train_labels)
     val_paths = resolve_detection_paths(args.data_config, train_paths["dataset_root"], "val", args.val_images, args.val_labels)
     class_names = coalesce(train_paths["class_names"], normalize_class_names(data_cfg.get("class_names")))
-    num_classes = coalesce(train_paths["num_classes"], data_cfg.get("num_classes"), len(class_names) if class_names else None, 6)
+    class_names, class_id_map = resolve_class_filter(data_cfg.get("include_classes"), class_names)
+    num_classes = len(class_names) if class_id_map is not None else coalesce(train_paths["num_classes"], data_cfg.get("num_classes"), len(class_names) if class_names else None, 6)
 
     resolved = {
         "config": args.config,
@@ -246,6 +275,7 @@ def resolve_args(args):
         "log_every_batches": coalesce(args.log_every, train_cfg.get("log_every_batches"), 0),
         "num_classes": num_classes,
         "class_names": class_names,
+        "class_id_map": class_id_map,
         "variant": coalesce(args.variant, model_cfg.get("variant"), "small"),
         "backbone_dims": parse_int_tuple(coalesce(args.backbone_dims, model_cfg.get("backbone_dims"), (16, 32, 64, 128)), "backbone_dims", 4),
         "backbone_depths": parse_int_tuple(coalesce(args.backbone_depths, model_cfg.get("backbone_depths"), (2, 2, 4, 2)), "backbone_depths", 4),
@@ -643,8 +673,8 @@ def main():
         erasing_prob=args.augment_erasing_prob,
         image_size=args.imgsz,
     )
-    train_loader = build_train_loader(args.train_images, args.train_labels, batch_size=args.batch, image_size=args.imgsz, num_workers=args.workers, balanced=args.balanced_sampler, class_names=args.class_names, augmenter=augmenter, background_weight=args.background_weight)
-    val_loader = build_val_loader(args.val_images, args.val_labels, batch_size=args.eval_batch, image_size=args.imgsz, num_workers=args.workers, class_names=args.class_names)
+    train_loader = build_train_loader(args.train_images, args.train_labels, batch_size=args.batch, image_size=args.imgsz, num_workers=args.workers, balanced=args.balanced_sampler, class_names=args.class_names, augmenter=augmenter, background_weight=args.background_weight, class_id_map=args.class_id_map)
+    val_loader = build_val_loader(args.val_images, args.val_labels, batch_size=args.eval_batch, image_size=args.imgsz, num_workers=args.workers, class_names=args.class_names, class_id_map=args.class_id_map)
     print(f"  Train batches : {len(train_loader)}")
     print(f"  Val batches   : {len(val_loader)}")
 

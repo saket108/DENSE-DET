@@ -325,6 +325,22 @@ def _parse_detection_label_file(label_path: str) -> list[dict[str, float | int |
     return annotations
 
 
+def _filter_and_remap_annotations(
+    annotations: list[dict[str, float | int | list[float]]],
+    class_id_map: dict[int, int] | None,
+) -> list[dict[str, float | int | list[float]]]:
+    if class_id_map is None:
+        return annotations
+
+    filtered: list[dict[str, float | int | list[float]]] = []
+    for ann in annotations:
+        old_class_id = int(ann["class_id"])
+        if old_class_id not in class_id_map:
+            continue
+        filtered.append({**ann, "class_id": class_id_map[old_class_id]})
+    return filtered
+
+
 def _empty_target(image_id: str) -> dict[str, torch.Tensor | str]:
     return {
         "boxes": torch.zeros((0, 4), dtype=torch.float32),
@@ -356,6 +372,7 @@ class StandardDetectionDataset(Dataset):
         class_names: list[str] | None = None,
         is_train: bool = True,
         augmenter: DetectionAugmenter | None = None,
+        class_id_map: dict[int, int] | None = None,
     ) -> None:
         self.images_dir = images_dir
         self.labels_dir = labels_dir
@@ -363,6 +380,7 @@ class StandardDetectionDataset(Dataset):
         self.class_names = class_names or []
         self.is_train = bool(is_train)
         self.augmenter = augmenter
+        self.class_id_map = class_id_map
         self.transform = make_transforms(image_size)
 
         self.records: list[dict[str, object]] = []
@@ -371,7 +389,10 @@ class StandardDetectionDataset(Dataset):
         for image_path in _list_image_files(images_dir):
             image_id = os.path.relpath(image_path, images_dir)
             label_path = _label_path_for_image(image_path, images_dir, labels_dir)
-            annotations = _parse_detection_label_file(label_path)
+            annotations = _filter_and_remap_annotations(
+                _parse_detection_label_file(label_path),
+                self.class_id_map,
+            )
             self.records.append(
                 {
                     "image_path": image_path,
@@ -519,6 +540,7 @@ def build_train_loader(
     class_names: list[str] | None = None,
     augmenter: DetectionAugmenter | None = None,
     background_weight: float | None = None,
+    class_id_map: dict[int, int] | None = None,
 ) -> DataLoader:
     dataset = StandardDetectionDataset(
         images_dir=images_dir,
@@ -527,6 +549,7 @@ def build_train_loader(
         class_names=class_names,
         is_train=True,
         augmenter=augmenter,
+        class_id_map=class_id_map,
     )
     if len(dataset) == 0:
         raise ValueError(f"No training images found in '{images_dir}'.")
@@ -553,6 +576,7 @@ def build_val_loader(
     image_size: int = 640,
     num_workers: int = 4,
     class_names: list[str] | None = None,
+    class_id_map: dict[int, int] | None = None,
 ) -> DataLoader:
     dataset = StandardDetectionDataset(
         images_dir=images_dir,
@@ -560,6 +584,7 @@ def build_val_loader(
         image_size=image_size,
         class_names=class_names,
         is_train=False,
+        class_id_map=class_id_map,
     )
     if len(dataset) == 0:
         raise ValueError(f"No validation images found in '{images_dir}'.")
