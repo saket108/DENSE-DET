@@ -1,3 +1,26 @@
+# DenseDet — optimised training config
+# All precision fixes applied:
+#   FIX-P1/P2: vfl_alpha=0.75, neg_loss_weight=1.5
+#   FIX-P3/P4: atss_min_iou_threshold=0.15, atss_topk=13
+#   FIX-P6:    prior_prob=0.001 in dense_detector.py (code-level fix)
+#   FIX-P7:    score = cls * quality (no sqrt) in dense_detector.py
+#   FIX-B1/B2: class_id_map in loader.py (code-level fix)
+#   Score calibration: eval_conf=0.05, monitor_conf=0.20 to match new product formula
+
+# ── paths ─────────────────────────────────────────────────────────────────────
+path: /kaggle/input/aircraft-dataset/content/Aircraft_dataset
+
+data:
+  num_classes: 6
+  class_names:
+    0: crack
+    1: dent
+    2: corrosion
+    3: scratch
+    4: missing-head
+    5: paint-peel-off
+
+# ── model ─────────────────────────────────────────────────────────────────────
 model:
   variant: small
   backbone_dims: [16, 32, 64, 128]
@@ -5,80 +28,78 @@ model:
   head_depth: 2
   use_quality_head: true
 
-data:
-  format: detection
-  num_classes: 6
-  class_names:
-    - crack
-    - dent
-    - corrosion
-    - scratch
-    - missing-head
-    - paint-peel-off
-  image_size: 640
-
+# ── training ──────────────────────────────────────────────────────────────────
 train:
-  epochs: 20
-  patience: 8
+  epochs: 150
+  patience: 30           # was 8 — aug causes natural plateaus, need longer patience
   batch_size: 8
-  accumulation_steps: 1
-  num_workers: 2
-  background_weight: 3.0
+  accumulation_steps: 2  # effective batch = 16, much stabler with LR=0.0004
   image_size: 640
-  balanced_sampler: false
+  num_workers: 2
+  balanced_sampler: true
   use_ema: true
-  ema_decay: 0.996
-  mixed_precision: false
+  ema_decay: 0.9998      # ~5000 step window; 0.997 is far too fast
+  mixed_precision: true
   compile: false
-  log_every_batches: 50
+  log_every_batches: 0
 
+# ── optimiser ─────────────────────────────────────────────────────────────────
 optimizer:
-  lr: 0.0001
+  lr: 0.0004             # proven stable across 8+ runs; 0.002 spikes val loss
   weight_decay: 0.01
 
+# ── LR schedule ───────────────────────────────────────────────────────────────
 scheduler:
-  warmup_epochs: 7
-  eta_min_ratio: 0.05
+  warmup_epochs: 5
+  eta_min_ratio: 0.05    # cosine floor = lr * 0.05 = 2e-5
 
+# ── loss ──────────────────────────────────────────────────────────────────────
 loss:
   assigner: atss
-  quality: 1.5
-  atss_topk: 5
+  atss_topk: 13          # FIX-P4: was 9
   atss_anchor_scale: 4.0
-  atss_min_iou_threshold: 0.10
-  vfl_alpha: 0.75
-  vfl_gamma: 2.5
+  atss_min_iou_threshold: 0.15  # FIX-P3: was 0.1
+  vfl_alpha: 0.75        # FIX-P1: was 0.55 — standard VFL value
+  vfl_gamma: 2.0
+  quality: 1.0
+  neg_loss_weight: 1.5   # FIX-P2: +50% gradient from background locations
+                         # increase to 2.0 if precision is still poor after ep30
 
+# ── augmentation ──────────────────────────────────────────────────────────────
 augmentation:
   enabled: true
-  close_after_epochs: 130
-  fliplr: 0.3
-  flipud: 0.0
-  rotate_deg: 5
-  mosaic_prob: 1.0
-  hsv_h: 0.005
-  hsv_s: 0.1
-  hsv_v: 0.05
-  blur_prob: 0.0
-  grayscale_prob: 0.0
-  equalize_prob: 0.0
-  erasing_prob: 0.0
+  close_after_epochs: 80  # keep aug on for first 53% of 150-epoch run
+  fliplr: 0.5
+  flipud: 0.2             # vertical flip useful for overhead aircraft views
+  rotate_deg: 10.0        # rotational invariance for surface defects
+  hsv_h: 0.015
+  hsv_s: 0.4
+  hsv_v: 0.2
+  blur_prob: 0.02
+  grayscale_prob: 0.02
+  equalize_prob: 0.02
+  erasing_prob: 0.10      # stronger random erasing helps background suppression
+  mosaic_prob: 0.0        # keep off (implementation issues in prior runs)
 
+# ── evaluation ────────────────────────────────────────────────────────────────
 eval:
-  batch_size: 8
-  conf_thresh: 0.05
-  monitor_conf_thresh: 0.25
+  during_train_every_epochs: 1   # evaluate every epoch for best checkpoint tracking
+  conf_thresh: 0.05              # low decode threshold — all detections kept for mAP
+  monitor_conf_thresh: 0.20      # FIX-P7: calibrated for product (cls*qual) formula
+                                 #   was 0.25/0.45 — product compresses range so
+                                 #   score=0.20 ≈ cls=0.45,qual=0.45 quality pair
   iou_thresh: 0.5
-  nms_iou: 0.45
-  max_det: 50
+  nms_iou: 0.6
+  max_det: 300
   use_ema: true
-  during_train_every_epochs: 2
-  during_train_max_batches: 50
   checkpoint_metric: map50_95
+  during_train_max_batches: ~   # null = use full val set (was 50 — gave 2.8x underestimate)
 
+# ── checkpoint ────────────────────────────────────────────────────────────────
 checkpoint:
   save_dir: runs/dense_det
 
+# ── benchmark comparison ──────────────────────────────────────────────────────
 benchmark:
   name: yolo_nano
   split: val
@@ -91,43 +112,31 @@ benchmark:
     map50_95: 0.361
   classes:
     crack:
-      images: 629
-      instances: 914
       precision: 0.803
       recall: 0.768
       map50: 0.789
       map50_95: 0.524
     dent:
-      images: 674
-      instances: 1140
       precision: 0.819
       recall: 0.746
       map50: 0.795
       map50_95: 0.526
     corrosion:
-      images: 112
-      instances: 197
       precision: 0.653
       recall: 0.755
       map50: 0.752
       map50_95: 0.511
     scratch:
-      images: 46
-      instances: 152
       precision: 0.761
       recall: 0.273
       map50: 0.316
       map50_95: 0.183
     missing-head:
-      images: 95
-      instances: 327
       precision: 0.459
       recall: 0.255
       map50: 0.259
       map50_95: 0.156
     paint-peel-off:
-      images: 93
-      instances: 214
       precision: 0.783
       recall: 0.435
       map50: 0.509

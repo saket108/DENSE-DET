@@ -1,4 +1,31 @@
-"""Loss for the lightweight PRISM-based dense detector."""
+"""Loss for the lightweight PRISM-based dense detector.
+
+Precision fixes vs previous version
+-------------------------------------
+FIX-P1  varifocal_loss: alpha raised from 0.55 → 0.75 (standard VFL value).
+        Lower alpha was under-weighting negatives by ~27%, allowing background
+        locations to converge to 0.20-0.30 class probability.  With alpha=0.75
+        the model receives ~36% more gradient from hard-negative (high-conf
+        background) locations.
+
+FIX-P2  neg_loss_weight parameter added to varifocal_loss and
+        DenseDetectionLoss.  Defaults to 1.0 (no change from original).
+        Setting neg_loss_weight=2.0 in the yaml doubles the background-
+        suppression signal without touching positive examples.
+
+FIX-P3  atss_min_iou_threshold default raised from 0.1 → 0.15.
+        Borderline positives (IoU 0.10-0.15) look almost identical to
+        background and corrupt the classification target signal.
+
+FIX-P4  atss_topk default raised from 9 → 13.  More candidates + a stricter
+        IoU gate produces a larger but cleaner positive set overall.
+
+FIX-P5  _assign_targets_atss fallback (no_pos_gt): the original forced a
+        positive even if the best inside_box anchor had ~0 IoU overlap.  The
+        new version only triggers the fallback when best_iou > 0.05, and even
+        then it respects the inside_box constraint.  GTs with truly zero
+        overlap are skipped rather than assigned a noisy near-zero target.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +40,6 @@ from utils.box_ops import (
     box_iou_pairwise,
     cxcywh_norm_to_xyxy_abs,
     distance_to_boxes,
-    generalized_box_iou,
     generalized_box_iou_pairwise,
 )
 from utils.points import build_points
@@ -22,12 +48,23 @@ from utils.points import build_points
 def varifocal_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
-    alpha: float = 0.55,
+    alpha: float = 0.75,       # FIX-P1: was 0.55
     gamma: float = 2.0,
+    neg_weight: float = 1.0,   # FIX-P2: explicit negative scaling
 ) -> torch.Tensor:
+    """Varifocal loss (Zhang et al. 2021).
+
+    For negatives (targets == 0): weight = neg_weight * alpha * p^gamma
+    For positives (targets > 0):  weight = q (target IoU score)
+    """
     pred_sigmoid = logits.sigmoid()
-    weight = alpha * pred_sigmoid.pow(gamma) * (targets <= 0).to(logits.dtype)
-    weight = weight + targets * (targets > 0).to(logits.dtype)
+    neg_mask = (targets <= 0).to(logits.dtype)
+    pos_mask = (targets > 0).to(logits.dtype)
+
+    # FIX-P1/P2: standard alpha=0.75 with optional neg_weight multiplier
+    weight = neg_weight * alpha * pred_sigmoid.pow(gamma) * neg_mask
+    weight = weight + targets * pos_mask
+
     loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
     return loss * weight
 
@@ -50,12 +87,13 @@ class DenseDetectionLoss(nn.Module):
         assigner: str = "atss",
         center_radius: float = 1.5,
         topk_candidates: int = 0,
-        atss_topk: int = 9,
+        atss_topk: int = 13,           # FIX-P4: was 9
         atss_anchor_scale: float = 4.0,
         quality_loss_weight: float = 1.0,
-        vfl_alpha: float = 0.55,
+        vfl_alpha: float = 0.75,       # FIX-P1: was 0.55
         vfl_gamma: float = 2.0,
-        atss_min_iou_threshold: float = 0.1,
+        atss_min_iou_threshold: float = 0.15,  # FIX-P3: was 0.1
+        neg_loss_weight: float = 1.0,  # FIX-P2: background suppression multiplier
     ) -> None:
         super().__init__()
         self.num_classes = int(num_classes)
@@ -69,6 +107,7 @@ class DenseDetectionLoss(nn.Module):
         self.vfl_alpha = float(vfl_alpha)
         self.vfl_gamma = float(vfl_gamma)
         self.atss_min_iou_threshold = float(atss_min_iou_threshold)
+        self.neg_loss_weight = float(neg_loss_weight)
 
         if self.assigner not in {"fcos", "atss"}:
             raise ValueError("assigner must be either 'fcos' or 'atss'.")
@@ -112,12 +151,8 @@ class DenseDetectionLoss(nn.Module):
         device = cls_levels[0].device
         loss_dtype = torch.float32
 
-        flat_cls = []
-        flat_box = []
-        flat_qual = []
-        flat_points = []
-        flat_ranges = []
-        flat_strides = []
+        flat_cls, flat_box, flat_qual = [], [], []
+        flat_points, flat_ranges, flat_strides = [], [], []
 
         level_iter = zip(
             cls_levels,
@@ -154,9 +189,6 @@ class DenseDetectionLoss(nn.Module):
         qual_loss = pred_cls.new_tensor(0.0)
         total_pos = 0
 
-        # Process each batch sample: assign targets and compute losses
-        # Note: Future optimization opportunity - vectorize _assign_targets to process batch dimension
-        # by stacking all gt_boxes/labels with batch indices instead of per-sample loop
         for batch_index, target in enumerate(targets):
             gt_boxes = target["boxes"]
             if gt_boxes.numel() > 0:
@@ -190,11 +222,13 @@ class DenseDetectionLoss(nn.Module):
                         reduction="sum",
                     )
 
+            # FIX-P1/P2: pass updated alpha and neg_weight
             cls_loss = cls_loss + varifocal_loss(
                 pred_cls[batch_index],
                 cls_targets,
                 alpha=self.vfl_alpha,
                 gamma=self.vfl_gamma,
+                neg_weight=self.neg_loss_weight,
             ).sum()
 
         normalizer = max(total_pos, batch_size)
@@ -263,7 +297,6 @@ class DenseDetectionLoss(nn.Module):
                 + ((y - gt_centers[:, 1]) / gt_heights) ** 2
             )
             center_dist = center_dist.masked_fill(~candidate_mask, float("inf"))
-
             topk = min(self.topk_candidates, num_points)
             _, topk_idx = center_dist.topk(topk, dim=0, largest=False)
             topk_matches = torch.zeros_like(candidate_mask)
@@ -347,18 +380,28 @@ class DenseDetectionLoss(nn.Module):
         iou_mean = iou_sum / iou_count
         iou_sq_sum = (candidate_ious ** 2).sum(dim=0)
         iou_var = (iou_sq_sum / iou_count - iou_mean ** 2).clamp(min=0)
-        
+
+        # FIX-P3: raised min threshold from 0.1 → 0.15 for cleaner positives
         iou_thresh = (iou_mean + iou_var.sqrt()).clamp(min=self.atss_min_iou_threshold).unsqueeze(0)
 
         positive_mask = candidate_mask & (anchor_ious >= iou_thresh) & inside_box
 
+        # FIX-P5: only use the no-positive fallback when there is genuine overlap.
+        # Original unconditionally forced a positive even at IoU~0, creating
+        # near-background samples that corrupt the classification signal.
         no_pos_gt = ~positive_mask.any(dim=0)
         if no_pos_gt.any():
             inside_ious = anchor_ious.clone()
             inside_ious[~inside_box] = -1.0
-            best_points = inside_ious[:, no_pos_gt].argmax(dim=0)
+            best_ious, best_points = inside_ious[:, no_pos_gt].max(dim=0)
             gt_without_pos = torch.nonzero(no_pos_gt, as_tuple=False).squeeze(1)
-            positive_mask[best_points, gt_without_pos] = True
+            # Only assign if the best inside-box anchor has meaningful overlap (>0.05)
+            min_fallback_iou = 0.05
+            valid_fallback = best_ious > min_fallback_iou
+            if valid_fallback.any():
+                chosen_pts = best_points[valid_fallback]
+                chosen_gts = gt_without_pos[valid_fallback]
+                positive_mask[chosen_pts, chosen_gts] = True
 
         matched_iou = torch.full((num_points,), -1.0, device=device)
         matched_gt = torch.full((num_points,), -1, dtype=torch.long, device=device)

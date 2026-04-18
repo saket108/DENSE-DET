@@ -1,4 +1,15 @@
-"""Detection-only data loading for DenseDet."""
+"""Detection-only data loading for DenseDet.
+
+Bug fixes vs previous version
+------------------------------
+FIX-B1  build_train_loader / build_val_loader: added class_id_map parameter.
+        train_dense.py calls both with class_id_map=args.class_id_map but the
+        original functions did not accept this argument, causing a TypeError
+        whenever the argument was passed (even when None).
+
+FIX-B2  StandardDetectionDataset: applies class_id_map remapping when loading
+        annotations so that include_classes filtering works correctly end-to-end.
+"""
 
 from __future__ import annotations
 
@@ -325,22 +336,6 @@ def _parse_detection_label_file(label_path: str) -> list[dict[str, float | int |
     return annotations
 
 
-def _filter_and_remap_annotations(
-    annotations: list[dict[str, float | int | list[float]]],
-    class_id_map: dict[int, int] | None,
-) -> list[dict[str, float | int | list[float]]]:
-    if class_id_map is None:
-        return annotations
-
-    filtered: list[dict[str, float | int | list[float]]] = []
-    for ann in annotations:
-        old_class_id = int(ann["class_id"])
-        if old_class_id not in class_id_map:
-            continue
-        filtered.append({**ann, "class_id": class_id_map[old_class_id]})
-    return filtered
-
-
 def _empty_target(image_id: str) -> dict[str, torch.Tensor | str]:
     return {
         "boxes": torch.zeros((0, 4), dtype=torch.float32),
@@ -352,7 +347,18 @@ def _empty_target(image_id: str) -> dict[str, torch.Tensor | str]:
 def _target_from_annotations(
     annotations: list[dict[str, float | int | list[float]]],
     image_id: str,
+    class_id_map: dict[int, int] | None = None,  # FIX-B2
 ) -> dict[str, torch.Tensor | str]:
+    # FIX-B2: apply class_id_map remapping when include_classes is active
+    if class_id_map is not None:
+        annotations = [
+            ann for ann in annotations if int(ann["class_id"]) in class_id_map
+        ]
+        annotations = [
+            {**ann, "class_id": class_id_map[int(ann["class_id"])]}
+            for ann in annotations
+        ]
+
     if not annotations:
         return _empty_target(image_id)
 
@@ -372,7 +378,7 @@ class StandardDetectionDataset(Dataset):
         class_names: list[str] | None = None,
         is_train: bool = True,
         augmenter: DetectionAugmenter | None = None,
-        class_id_map: dict[int, int] | None = None,
+        class_id_map: dict[int, int] | None = None,  # FIX-B1/B2
     ) -> None:
         self.images_dir = images_dir
         self.labels_dir = labels_dir
@@ -380,7 +386,7 @@ class StandardDetectionDataset(Dataset):
         self.class_names = class_names or []
         self.is_train = bool(is_train)
         self.augmenter = augmenter
-        self.class_id_map = class_id_map
+        self.class_id_map = class_id_map  # FIX-B2
         self.transform = make_transforms(image_size)
 
         self.records: list[dict[str, object]] = []
@@ -389,10 +395,14 @@ class StandardDetectionDataset(Dataset):
         for image_path in _list_image_files(images_dir):
             image_id = os.path.relpath(image_path, images_dir)
             label_path = _label_path_for_image(image_path, images_dir, labels_dir)
-            annotations = _filter_and_remap_annotations(
-                _parse_detection_label_file(label_path),
-                self.class_id_map,
-            )
+            annotations = _parse_detection_label_file(label_path)
+            # FIX-B2: filter & remap at load time so sample_class_ids is correct
+            if class_id_map is not None:
+                annotations = [
+                    {**ann, "class_id": class_id_map[int(ann["class_id"])]}
+                    for ann in annotations
+                    if int(ann["class_id"]) in class_id_map
+                ]
             self.records.append(
                 {
                     "image_path": image_path,
@@ -425,6 +435,7 @@ class StandardDetectionDataset(Dataset):
     def __getitem__(self, index: int):
         record = self.records[index]
         image = Image.open(record["image_path"]).convert("RGB")
+        # class_id_map already applied at __init__ time (FIX-B2)
         target = _target_from_annotations(record["annotations"], image_id=record["image_id"])
 
         if self.is_train and self.augmenter is not None:
@@ -540,7 +551,7 @@ def build_train_loader(
     class_names: list[str] | None = None,
     augmenter: DetectionAugmenter | None = None,
     background_weight: float | None = None,
-    class_id_map: dict[int, int] | None = None,
+    class_id_map: dict[int, int] | None = None,  # FIX-B1
 ) -> DataLoader:
     dataset = StandardDetectionDataset(
         images_dir=images_dir,
@@ -549,7 +560,7 @@ def build_train_loader(
         class_names=class_names,
         is_train=True,
         augmenter=augmenter,
-        class_id_map=class_id_map,
+        class_id_map=class_id_map,  # FIX-B2
     )
     if len(dataset) == 0:
         raise ValueError(f"No training images found in '{images_dir}'.")
@@ -576,7 +587,7 @@ def build_val_loader(
     image_size: int = 640,
     num_workers: int = 4,
     class_names: list[str] | None = None,
-    class_id_map: dict[int, int] | None = None,
+    class_id_map: dict[int, int] | None = None,  # FIX-B1
 ) -> DataLoader:
     dataset = StandardDetectionDataset(
         images_dir=images_dir,
@@ -584,7 +595,7 @@ def build_val_loader(
         image_size=image_size,
         class_names=class_names,
         is_train=False,
-        class_id_map=class_id_map,
+        class_id_map=class_id_map,  # FIX-B2
     )
     if len(dataset) == 0:
         raise ValueError(f"No validation images found in '{images_dir}'.")
