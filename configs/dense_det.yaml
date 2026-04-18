@@ -23,11 +23,11 @@ train:
   batch_size: 8
   accumulation_steps: 1
   num_workers: 8
-  background_weight: 0.5
+  background_weight: 3.0
   image_size: 640
   balanced_sampler: true
   use_ema: true
-  ema_decay: 0.997
+  ema_decay: 0.996
   mixed_precision: true
   compile: false
   log_every_batches: 50
@@ -37,7 +37,7 @@ optimizer:
   weight_decay: 0.01
 
 scheduler:
-  warmup_epochs: 5
+  warmup_epochs: 7
   eta_min_ratio: 0.05
 
 loss:
