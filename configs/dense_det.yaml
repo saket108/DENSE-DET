@@ -23,7 +23,7 @@ train:
   batch_size: 8
   accumulation_steps: 1
   num_workers: 8
-  background_weight: 1.0
+  background_weight: 0.5
   image_size: 640
   balanced_sampler: true
   use_ema: true
@@ -37,21 +37,21 @@ optimizer:
   weight_decay: 0.01
 
 scheduler:
-  warmup_epochs: 0
+  warmup_epochs: 5
   eta_min_ratio: 0.05
 
 loss:
   assigner: atss
-  quality: 2.0
+  quality: 1.5
   atss_topk: 5
   atss_anchor_scale: 4.0
-  atss_min_iou_threshold: 0.05
-  vfl_alpha: 0.50
-  vfl_gamma: 2.0
+  atss_min_iou_threshold: 0.10
+  vfl_alpha: 0.75
+  vfl_gamma: 2.5
 
 augmentation:
   enabled: true
-  close_after_epochs: 140
+  close_after_epochs: 130
   fliplr: 0.3
   flipud: 0.0
   rotate_deg: 5
@@ -67,11 +67,11 @@ augmentation:
 eval:
   batch_size: 8
   conf_thresh: 0.05
-  monitor_conf_thresh: 0.45
+  monitor_conf_thresh: 0.25
   iou_thresh: 0.5
-  nms_iou: 0.6
-  max_det: 300
-  use_ema: false
+  nms_iou: 0.45
+  max_det: 50
+  use_ema: true
   during_train_every_epochs: 2
   during_train_max_batches: 50
   checkpoint_metric: map50_95
