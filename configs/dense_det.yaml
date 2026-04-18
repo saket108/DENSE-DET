@@ -18,7 +18,7 @@ data:
   image_size: 640
 
 train:
-  epochs: 50
+  epochs: 150
   patience: 8
   batch_size: 8
   accumulation_steps: 1
@@ -51,11 +51,11 @@ loss:
 
 augmentation:
   enabled: true
-  close_after_epochs: 40
+  close_after_epochs: 140
   fliplr: 0.3
   flipud: 0.0
   rotate_deg: 5
-  mosaic_prob: 0.0
+  mosaic_prob: 1.0
   hsv_h: 0.005
   hsv_s: 0.1
   hsv_v: 0.05

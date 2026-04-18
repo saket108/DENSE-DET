@@ -25,7 +25,7 @@ from data.loader import DetectionAugmenter, build_train_loader, build_val_loader
 from evaluate_dense import print_benchmark_comparison, run_dense_evaluation_with_raw
 from model.dense_detector import DenseDet
 from training.dense_loss import DenseDetectionLoss
-from utils.detection_metrics import mean_metric
+from utils.detection_metrics import evaluate_predictions, mean_metric, summarize_metrics
 from utils.reporting import save_batch_preview, save_detection_artifacts, save_history_plot
 from utils.runtime import coalesce, load_yaml_config, normalize_class_names, parse_int_tuple, require_existing_paths, resolve_detection_paths
 
@@ -415,6 +415,21 @@ def print_eval_table(ap50: dict, ap5095: dict, pr_metrics: dict, summary: dict, 
     )
 
 
+def filter_predictions_by_confidence(all_preds: list[dict], conf_thresh: float) -> list[dict]:
+    filtered = []
+    for pred in all_preds:
+        confidences = pred["confidences"]
+        keep = confidences >= conf_thresh
+        filtered.append(
+            {
+                "boxes": pred["boxes"][keep],
+                "labels": pred["labels"][keep],
+                "confidences": confidences[keep],
+            }
+        )
+    return filtered
+
+
 def print_epoch_summary(epoch: int, total_epochs: int, train_loss: float, val_loss: float, train_stats: dict | None, map50, map5095, summary: dict | None, elapsed: float, checkpoint_improved: bool = False, best_score: float | None = None) -> None:
     box = "n/a" if train_stats is None else f"{train_stats['box']:.4f}"
     cls = "n/a" if train_stats is None else f"{train_stats['cls']:.4f}"
@@ -756,6 +771,15 @@ def main():
                     current_epoch=epoch,
                     warmup_quality_epochs=10,
                 )
+            if args.eval_monitor_conf is not None and all_preds is not None and all_targets is not None:
+                monitor_preds = filter_predictions_by_confidence(all_preds, float(args.eval_monitor_conf))
+                pr_metrics = evaluate_predictions(
+                    monitor_preds,
+                    all_targets,
+                    num_classes=args.num_classes,
+                    iou_threshold=args.eval_iou,
+                )
+                summary = summarize_metrics(pr_metrics)
             map50 = mean_metric(list(ap50.values()))
             map5095 = mean_metric(list(ap5095.values()))
             if all_preds is not None and all_targets is not None:
