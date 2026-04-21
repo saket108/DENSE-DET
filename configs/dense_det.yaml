@@ -50,7 +50,7 @@ optimizer:
 
 # ── LR schedule ───────────────────────────────────────────────────────────────
 scheduler:
-  warmup_epochs: 5
+  warmup_epochs: 15
   eta_min_ratio: 0.05    # cosine floor = lr * 0.05 = 2e-5
 
 # ── loss ──────────────────────────────────────────────────────────────────────
